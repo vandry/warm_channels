@@ -1,0 +1,49 @@
+[package]
+name = "warm_channels"
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/vandry/warm_channels.git"
+homepage = "https://github.com/vandry/warm_channels"
+description = "Always-ready HTTP client channels for gRPC or other RPC-like requests."
+license = "MIT"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+async-stream = "0.3"
+backoff = "0.4"
+futures = "0.3"
+http = "1.1"
+humantime = "2.1"
+hyper = { version = "1.5", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+lazy_static = { version = "1.5", optional = true }
+log = "0.4"
+pin-project-lite = "0.2"
+prometheus = { version = "0.13", optional = true }
+thiserror = "2.0"
+tokio = { version = "1.40", features = ["macros", "net"] }
+tokio-rustls = { version = "0.26", optional = true }
+tonic = { version = "0.12", optional = true }
+tonic-health = { version = "0.12", optional = true }
+tonic_prometheus_layer = { version = "0.1", optional = true }
+tower = { version = "0.5", features = ["balance", "buffer", "discover"] }
+tower-service = "0.3"
+trust-dns-resolver = "0.23"
+want = "0.3"
+
+[features]
+default = ["grpc", "tls", "metrics", "unix"]
+grpc = ["dep:tonic", "dep:tonic-health", "dep:tonic_prometheus_layer"]
+tls = ["dep:tokio-rustls"]
+metrics = ["dep:lazy_static", "dep:prometheus"]
+unix = []
+
+[dev-dependencies]
+assert_matches = "1.5"
+hyper = { version = "1.5", features = ["client", "http2", "server"] }
+testing_logger = "0.1"
+tokio-stream = "0.1"
+tokio-test = "0.4"

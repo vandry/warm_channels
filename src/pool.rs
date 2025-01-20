@@ -413,12 +413,15 @@ where
         if self.n_subchannels_healthy >= self.config.n_subchannels_healthy_min {
             return Either::Left(std::future::pending());
         }
-        let now = tokio::time::Instant::now();
         let (still, d) = match self.unhealthy_logging_state {
-            UnhealthyLoggingState::Happy => unreachable!(),
+            UnhealthyLoggingState::Happy => {
+                // Logging not enabled
+                return Either::Left(std::future::pending());
+            }
             UnhealthyLoggingState::UnhappyNotYetLogged(ref d) => ("", d),
             UnhealthyLoggingState::UnhappyAlreadyLogged(ref d) => (" still", d),
         };
+        let now = tokio::time::Instant::now();
         if d.next_log_time <= now {
             self.common
                 .last_error
@@ -738,6 +741,31 @@ mod tests {
             panic!("did not find expected ResolverGaveUp error in log");
         });
         assert!(t.healthy().is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_addresses_at_all_never_log() {
+        testing_logger::setup();
+        let mut config = TEST_CONFIG.clone();
+        config.log_unhealthy_initial_delay = None;
+        let mut discover = pin!(balancer_pool(
+            config,
+            "no_addresses_at_all_never_log",
+            TestMaker,
+            backoff::ExponentialBackoff::default(),
+            |_| (),
+            futures::stream::empty::<Result<_, std::convert::Infallible>>(),
+        ));
+        assert!(poll!(discover.next()).is_pending());
+        tokio::time::advance(Duration::from_secs(999999)).await;
+        assert!(poll!(discover.next()).is_pending());
+        testing_logger::validate(|captured_logs| {
+            for l in captured_logs {
+                if l.body.contains("not healthy after") {
+                    panic!("logged unhealthy but should not");
+                }
+            }
+        });
     }
 
     #[tokio::test(start_paused = true)]

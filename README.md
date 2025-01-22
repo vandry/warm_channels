@@ -56,7 +56,7 @@ dynamically reloaded when changed (such as on certificate rotation).
 - Configuration of the channel's backend URI and other configurable
 properties using a standard set of flags.
 
-# gRPC client example
+# gRPC client example using warm_channels directly
 
 ```rust
 use std::sync::Arc;
@@ -81,6 +81,21 @@ let client = pb::test_client::TestClient::with_origin(stack, uri);
 println!("{:?}", client.greet(tonic::Request::new(())).await);
 ```
 
+# gRPC client example using [`comprehensive`]
+
+```rust
+use comprehensive_grpc::GrpcClient;
+
+#[derive(GrpcClient)]
+struct Client(
+    pb::test_client::TestClient<comprehensive_grpc::client::Channel>,
+    comprehensive_grpc::client::ClientWorker,
+);
+```
+
+`Client` may then be included as a dependency in a Comprehensive Assembly.
+See the full [gRPC hello world client example].
+
 # Possible future work:
 
 - Dynamically sized member set, probably based on reacting to request
@@ -98,5 +113,6 @@ All are enabled by default.
 [`comprehensive`]: https://docs.rs/comprehensive/latest/comprehensive/
 [`rustls`]: https://docs.rs/rustls/latest/rustls/
 [`tonic`]: https://docs.rs/tonic/latest/tonic/
+[gRPC hello world client example]: https://github.com/vandry/comprehensive/blob/master/examples/src/helloworld-grpc-client.rs
 
 <!-- cargo-rdme end -->

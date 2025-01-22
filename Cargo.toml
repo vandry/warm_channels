@@ -1,6 +1,6 @@
 [package]
 name = "warm_channels"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 repository = "https://github.com/vandry/warm_channels.git"
 homepage = "https://github.com/vandry/warm_channels"
@@ -43,6 +43,8 @@ unix = []
 
 [dev-dependencies]
 assert_matches = "1.5"
+comprehensive = "0.5"
+comprehensive_grpc = "0.5"
 hyper = { version = "1.5", features = ["client", "http2", "server"] }
 testing_logger = "0.1"
 tokio-stream = "0.1"

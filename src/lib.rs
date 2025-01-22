@@ -54,7 +54,7 @@
 //! - Configuration of the channel's backend URI and other configurable
 //! properties using a standard set of flags.
 //!
-//! # gRPC client example
+//! # gRPC client example using warm_channels directly
 //!
 //! ```
 //! use std::sync::Arc;
@@ -89,6 +89,28 @@
 //! # });
 //! ```
 //!
+//! # gRPC client example using [`comprehensive`]
+//!
+//! ```
+//! use comprehensive_grpc::GrpcClient;
+//! # // Fake for demo
+//! # mod pb { pub mod test_client {
+//! #   #[derive(Clone)] pub struct TestClient<T: Clone>(T);
+//! #   impl<T: Clone> TestClient<T> {
+//! #     pub fn with_origin<U>(t: T, u: U) -> Self { Self(t) }
+//! #   }
+//! # } }
+//!
+//! #[derive(GrpcClient)]
+//! struct Client(
+//!     pb::test_client::TestClient<comprehensive_grpc::client::Channel>,
+//!     comprehensive_grpc::client::ClientWorker,
+//! );
+//! ```
+//!
+//! `Client` may then be included as a dependency in a Comprehensive Assembly.
+//! See the full [gRPC hello world client example].
+//!
 //! # Possible future work:
 //!
 //! - Dynamically sized member set, probably based on reacting to request
@@ -106,6 +128,7 @@
 //! [`comprehensive`]: https://docs.rs/comprehensive/latest/comprehensive/
 //! [`rustls`]: https://docs.rs/rustls/latest/rustls/
 //! [`tonic`]: https://docs.rs/tonic/latest/tonic/
+//! [gRPC hello world client example]: https://github.com/vandry/comprehensive/blob/master/examples/src/helloworld-grpc-client.rs
 
 #![warn(missing_docs)]
 

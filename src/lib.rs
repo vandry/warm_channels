@@ -24,35 +24,35 @@
 //! Some of the features brought by this crate are:
 //!
 //! - As soon as they are created, and continuing in the background for their
-//! lifetime, channels begin attempting to constantly maintain a
-//! sufficiently-sized pool of healthy member connections to backends.
+//!   lifetime, channels begin attempting to constantly maintain a
+//!   sufficiently-sized pool of healthy member connections to backends.
 //! - If multiple backend addresses are available, the channel will attempt
-//! to use all of them, using different addresses for different member
-//! connections, mitigating the effect of single backend tasks going away.
+//!   to use all of them, using different addresses for different member
+//!   connections, mitigating the effect of single backend tasks going away.
 //! - Name resolution follows DNS TTLs, so that if the backend is using
-//! DNS-based load balancing the channel notices and reacts when its
-//! assignment changes.
+//!   DNS-based load balancing the channel notices and reacts when its
+//!   assignment changes.
 //! - Member connections are individually health-checked and evicted from
-//! the channel when they fail. Note that this is different to plain
-//! [`tower::balance::p2c::Balance`], which only polls (and potentially
-//! evicts) members on use.
+//!   the channel when they fail. Note that this is different to plain
+//!   [`tower::balance::p2c::Balance`], which only polls (and potentially
+//!   evicts) members on use.
 //! - Channels that become critically unhealthy (too few healthy members are
-//! healthy) are handled in a degraded mode: we temporarily make connected
-//! but unhealthy members available to accept requests and stop evicting them.
+//!   healthy) are handled in a degraded mode: we temporarily make connected
+//!   but unhealthy members available to accept requests and stop evicting them.
 //!
 //! This crate can be used by itself but is designed to be used with
 //! [`comprehensive`] which will further add the following features:
 //!
 //! - Easy macro-based declaration of a gRPC client made available as a
-//! resource to the rest of the assembly.
+//!   resource to the rest of the assembly.
 //! - Automatically connected to the assembly-wide health status signal so
-//! that when a client channel to a required backend is unhealthy then the
-//! colocated server resources also report unhealthy.
+//!   that when a client channel to a required backend is unhealthy then the
+//!   colocated server resources also report unhealthy.
 //! - TLS configuration supplied from the assembly-wide TLS resource
-//! (reflecting the use of a process-wide cryptographic identiry and
-//! dynamically reloaded when changed (such as on certificate rotation).
+//!   (reflecting the use of a process-wide cryptographic identiry and
+//!   dynamically reloaded when changed (such as on certificate rotation).
 //! - Configuration of the channel's backend URI and other configurable
-//! properties using a standard set of flags.
+//!   properties using a standard set of flags.
 //!
 //! # gRPC client example using warm_channels directly
 //!
@@ -114,7 +114,7 @@
 //! # Possible future work:
 //!
 //! - Dynamically sized member set, probably based on reacting to request
-//! processing latency.
+//!   processing latency.
 //!
 //! # Features
 //!
@@ -254,7 +254,7 @@ mod testutil;
 pub mod tls;
 pub mod util;
 
-pub use channel::{pool_service, Channel};
+pub use channel::{Channel, pool_service};
 #[cfg(feature = "grpc")]
 pub use grpc::grpc_channel;
 pub use http::http_channel;

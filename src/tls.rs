@@ -12,8 +12,8 @@ use thiserror::Error;
 use tokio_rustls::rustls::client::ClientConfig;
 use tokio_rustls::rustls::pki_types::{InvalidDnsNameError, ServerName};
 
-use crate::eitherio::EitherIO;
 use crate::Connector;
+use crate::eitherio::EitherIO;
 
 #[derive(Debug)]
 enum TLSConnectorStyle {

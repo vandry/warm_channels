@@ -23,15 +23,15 @@
 //! addresses changes.
 
 use async_stream::stream;
-use backoff::{backoff::Backoff, ExponentialBackoff};
+use backoff::{ExponentialBackoff, backoff::Backoff};
 use futures::{Stream, StreamExt, TryFutureExt};
 use http::Uri;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
-use trust_dns_resolver::error::ResolveError;
 use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::error::ResolveError;
 
 const MIN_TTL: Duration = Duration::from_millis(10000);
 
@@ -131,7 +131,10 @@ pub enum ResolveUriError {
 pub fn resolve_uri<'a, R, RR>(
     uri: &Uri,
     resolver: RR,
-) -> Result<impl Stream<Item = Result<Vec<SocketAddr>, R::Error>> + 'a, ResolveUriError>
+) -> Result<
+    impl Stream<Item = Result<Vec<SocketAddr>, R::Error>> + 'a + use<'a, R, RR>,
+    ResolveUriError,
+>
 where
     RR: AsRef<R> + Send + 'a,
     R: Resolve + 'a,

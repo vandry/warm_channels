@@ -36,8 +36,8 @@
 //! ```
 
 use async_stream::stream;
-use futures::future::Either;
 use futures::Stream;
+use futures::future::Either;
 use http::Uri;
 use hyper::body::Body;
 use std::borrow::Cow;
@@ -46,9 +46,9 @@ use std::pin::pin;
 use std::time::Duration;
 use thiserror::Error;
 use tonic::body::BoxBody;
+use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
-use tonic_health::pb::HealthCheckRequest;
 use tower_service::Service;
 
 use crate::Connector;
@@ -241,14 +241,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures::{poll, StreamExt};
+    use futures::{StreamExt, poll};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::task::Poll;
     use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
 
     use super::*;
-    use crate::testutil::{TestServer, TestServerAddress};
     use crate::HealthChecker;
+    use crate::testutil::{TestServer, TestServerAddress};
 
     struct TestHealth {
         count: AtomicU64,

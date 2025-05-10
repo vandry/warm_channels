@@ -7,15 +7,15 @@
 
 #[cfg(feature = "unix")]
 use futures::TryFutureExt;
-use futures::{future::Either, FutureExt};
+use futures::{FutureExt, future::Either};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpStream;
 
+use crate::Connector;
 #[cfg(feature = "unix")]
 use crate::eitherio::EitherIO;
-use crate::Connector;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(30000);
 

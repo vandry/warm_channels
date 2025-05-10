@@ -78,7 +78,7 @@ impl<D, R> Inventory<D, R> {
         }
     }
 
-    pub(crate) fn allocate(&mut self, data: D) -> impl Future<Output = Reporter<R>> {
+    pub(crate) fn allocate(&mut self, data: D) -> impl Future<Output = Reporter<R>> + use<D, R> {
         let i = self
             .next_free
             .expect("Attempted to allocate more than inventory will fit");
@@ -120,7 +120,7 @@ impl<D, R> Inventory<D, R> {
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut D> + '_ {
         self.entries.iter_mut().filter_map(|e| match e {
             InventoryEntry::Vacant(_) => None,
-            InventoryEntry::Occupied(ref mut e) => Some(e),
+            InventoryEntry::Occupied(e) => Some(e),
         })
     }
 
@@ -128,7 +128,7 @@ impl<D, R> Inventory<D, R> {
     pub(crate) fn iter(&self) -> impl Iterator<Item = &D> + '_ {
         self.entries.iter().filter_map(|e| match e {
             InventoryEntry::Vacant(_) => None,
-            InventoryEntry::Occupied(ref e) => Some(e),
+            InventoryEntry::Occupied(e) => Some(e),
         })
     }
 }

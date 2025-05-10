@@ -1,7 +1,7 @@
 [package]
 name = "warm_channels"
 version = "0.1.3"
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/vandry/warm_channels.git"
 homepage = "https://github.com/vandry/warm_channels"
 description = "Always-ready HTTP client channels for gRPC or other RPC-like requests."

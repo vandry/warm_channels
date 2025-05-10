@@ -29,18 +29,18 @@ lazy_static! {
 }
 
 pub(crate) fn n_channels_want(name: &str, n: usize) {
-    N_CHANNELS_WANT.with_label_values(&[&name]).set(n as f64);
+    N_CHANNELS_WANT.with_label_values(&[name]).set(n as f64);
 }
 
 pub(crate) fn n_channels_update(name: &str, total: usize, healthy: usize) {
     N_CHANNELS_CURRENT
-        .with_label_values(&[&name])
+        .with_label_values(&[name])
         .set(total as f64);
     N_CHANNELS_HEALTHY
-        .with_label_values(&[&name])
+        .with_label_values(&[name])
         .set(healthy as f64);
 }
 
 pub(crate) fn n_channels_inc(name: &str) {
-    N_CHANNELS_OPENED.with_label_values(&[&name]).inc();
+    N_CHANNELS_OPENED.with_label_values(&[name]).inc();
 }

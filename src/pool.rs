@@ -1,19 +1,19 @@
 use async_stream::stream;
 use backoff::backoff::Backoff;
 use futures::future::Either;
-use futures::{select, FutureExt, Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt, select};
 use humantime::{format_duration, format_rfc3339};
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tower::discover::Change;
 
+use crate::PoolMemberMaker;
 use crate::addresses::{AddressSlot, ResolvedAddressChoice, ResolvedAddressCollection};
 use crate::report::{Inventory, InventoryReport};
-use crate::PoolMemberMaker;
 
 /// Configuration parameters for load-balanced channels.
 #[derive(Clone, Debug)]
@@ -417,7 +417,7 @@ where
         }
     }
 
-    fn log_unhealthy(&mut self) -> impl Future<Output = ()> {
+    fn log_unhealthy(&mut self) -> impl Future<Output = ()> + use<A, B, HR, L> {
         if self.n_subchannels_healthy >= self.config.n_subchannels_healthy_min {
             return Either::Left(std::future::pending());
         }
@@ -911,14 +911,15 @@ mod tests {
                 .expect("2 healthy subchannels, should be healthy"),
             true
         );
-        assert!(t
-            .common
-            .as_ref()
-            .unwrap()
-            .last_error
-            .lock()
-            .unwrap()
-            .is_none());
+        assert!(
+            t.common
+                .as_ref()
+                .unwrap()
+                .last_error
+                .lock()
+                .unwrap()
+                .is_none()
+        );
         c3.send(true).await;
         // No more, we already have the wanted number.
         assert!(poll!(t.discover.next()).is_pending());

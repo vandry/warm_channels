@@ -36,10 +36,10 @@
 //! ```
 
 use futures::future::Either;
-use futures::{select, FutureExt, Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt, select};
 use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
@@ -129,11 +129,13 @@ async fn worker<I, R, S, U>(
             // or they got delivered on their own.
             intervene_deadline = None;
         }
-        let mut alarm = pin!(match intervene_deadline {
-            None => Either::Left(std::future::pending()),
-            Some(ref d) => Either::Right(tokio::time::sleep_until(*d)),
-        }
-        .fuse());
+        let mut alarm = pin!(
+            match intervene_deadline {
+                None => Either::Left(std::future::pending()),
+                Some(ref d) => Either::Right(tokio::time::sleep_until(*d)),
+            }
+            .fuse()
+        );
         select! {
             item = upstream.next() => {
                 stream_continues = item.is_some();

@@ -3,8 +3,8 @@ use http::StatusCode;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::DuplexStream;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

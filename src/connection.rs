@@ -1,21 +1,21 @@
 use futures::future::Either;
-use futures::{select, FutureExt, StreamExt, TryFutureExt};
+use futures::{FutureExt, StreamExt, TryFutureExt, select};
 use hyper::body::Body;
 use hyper::client::conn::http2::SendRequest;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use pin_project_lite::pin_project;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::{pin, Pin};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll, ready};
 use thiserror::Error;
 use tower_service::Service;
 
+use crate::Connector;
 use crate::pool::PoolCommon;
 use crate::report::Reporter;
-use crate::Connector;
 
 struct SendRequestService<B>(SendRequest<B>);
 
@@ -187,10 +187,12 @@ where
         };
         let mut begin_usage = Some((sender.clone(), sender_tx));
         let mut healthy = None;
-        let mut hc_stream = pin!(shared
-            .health_checker
-            .watch(SendRequestService(sender))
-            .fuse());
+        let mut hc_stream = pin!(
+            shared
+                .health_checker
+                .watch(SendRequestService(sender))
+                .fuse()
+        );
         let mut conn = pin!(conn.fuse());
         loop {
             select! {
@@ -428,15 +430,15 @@ where
 mod tests {
     use async_stream::stream;
     use futures::Stream;
-    use tower::layer::util::Identity;
     use tower::ServiceExt;
+    use tower::layer::util::Identity;
 
     use super::*;
+    use crate::PoolMemberMaker;
     use crate::pool::PoolCommonTestInterface;
     use crate::report::{Inventory, InventoryReport};
     use crate::testutil::{TestServer, TestServerAddress};
     use crate::util::AssumeAlwaysHealthy;
-    use crate::PoolMemberMaker;
 
     #[derive(Debug)]
     struct TestHealthCheck(Arc<tokio::sync::Semaphore>);

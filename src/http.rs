@@ -7,8 +7,8 @@
 use futures::Stream;
 use std::future::Future;
 
-use crate::util::AssumeAlwaysHealthy;
 use crate::Connector;
+use crate::util::AssumeAlwaysHealthy;
 
 /// The type of the channel returned by [`http_channel`]. This implements
 /// [`tower_service::Service`] with `ReqBody` as the HTTP request body.
@@ -71,8 +71,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use futures::future::Either;
     use futures::FutureExt;
+    use futures::future::Either;
     use std::pin::pin;
     use tower::ServiceExt;
     use tower_service::Service;

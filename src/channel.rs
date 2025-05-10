@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use tower::load::pending_requests::PendingRequests;
 use tower_service::Service;
 
-use crate::pool::{balancer_pool, PoolConfig};
+use crate::pool::{PoolConfig, balancer_pool};
 use crate::{Connector, HealthChecker};
 
 type ChannelInner<S, ReqBody> =
@@ -30,22 +30,20 @@ where
     }
 }
 
-fn client_worker<BW, W>(buffer_worker: BW, worker: W) -> impl Future<Output = ()>
+async fn client_worker<BW, W>(buffer_worker: BW, worker: W)
 where
     BW: Future + Send + 'static,
     W: Future + Send + 'static,
 {
-    async {
-        let _ = tokio::spawn(async move {
-            let mut buffer_worker = pin!(buffer_worker.fuse());
-            let mut worker = pin!(worker.fuse());
-            select! {
-                _ = buffer_worker => (),
-                _ = worker => (),
-            }
-        })
-        .await;
-    }
+    let _ = tokio::spawn(async move {
+        let mut buffer_worker = pin!(buffer_worker.fuse());
+        let mut worker = pin!(worker.fuse());
+        select! {
+            _ = buffer_worker => (),
+            _ = worker => (),
+        }
+    })
+    .await;
 }
 
 pub(crate) type PoolService<A, ReqBody, C, HC> = crate::balance_driver::ShimmedService<
@@ -66,22 +64,22 @@ pub(crate) type PoolService<A, ReqBody, C, HC> = crate::balance_driver::ShimmedS
 ///
 /// Args:
 /// - `config`: Load balancing pool configuration parameters such as health
-/// thresholds. See [`PoolConfig`].
+///   thresholds. See [`PoolConfig`].
 /// - `label`: A string name for this channel, used for logging and metrics.
 /// - `connector`: A [`Connector`] plugin for establishing underlying byte
-/// IO channels.
+///   IO channels.
 /// - `resolution_stream`: A [`Stream`] of resolved addresses available for
-/// the channel to connect to. See [`crate::resolver`].
+///   the channel to connect to. See [`crate::resolver`].
 /// - `health_checker`: A [`HealthChecker`] plugin which is responsible for
-/// health-checking individual channel member connections.
+///   health-checking individual channel member connections.
 /// - `healthy_callback`: A closure which will be called with a single
-/// boolean argument when the health status of the load-balanced channel
-/// changes, with true meaning healthy and false unhealthy.
+///   boolean argument when the health status of the load-balanced channel
+///   changes, with true meaning healthy and false unhealthy.
 ///
 /// Returns:
 /// - A [`tower::balance::p2c::Balance`] service which accepts requests.
 /// - A worker which must be spawned as a task on an executor (e.g.
-/// using [`tokio::task::spawn`]) in order for the channel to work.
+///   using [`tokio::task::spawn`]) in order for the channel to work.
 pub fn pool_service<A, RS, RE, C, HC, HR, ReqBody, L>(
     config: PoolConfig,
     label: L,

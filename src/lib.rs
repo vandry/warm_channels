@@ -233,6 +233,8 @@ mod addresses;
 mod balance_driver;
 mod channel;
 mod connection;
+#[cfg(feature = "diag")]
+mod diag;
 #[cfg(any(feature = "tls", feature = "unix"))]
 mod eitherio;
 #[cfg(feature = "grpc")]
@@ -243,6 +245,8 @@ mod metrics;
 mod pool;
 mod report;
 pub mod resolver;
+#[cfg(feature = "diag")]
+mod snapshot;
 pub mod stream;
 #[cfg(test)]
 mod testutil;
@@ -256,3 +260,6 @@ pub use grpc::grpc_channel;
 pub use http::http_channel;
 pub use pool::PoolConfig;
 pub use resolver::resolve_uri;
+
+#[cfg(feature = "diag")]
+pub use diag::ChannelDiagService;

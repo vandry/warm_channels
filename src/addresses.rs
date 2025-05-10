@@ -49,6 +49,19 @@ impl<A: Clone, B: Backoff> ResolvedAddress<A, B> {
     }
 }
 
+#[cfg(feature = "diag")]
+impl<A: std::fmt::Debug, B> ResolvedAddress<A, B> {
+    fn diag(&self, is_next: bool) -> String {
+        format!(
+            "{:?}{}, currently used by {} connections{}",
+            self.addr,
+            if self.resolved { "" } else { ", stale" },
+            self.used_count,
+            if is_next { ", use next" } else { "" }
+        )
+    }
+}
+
 pub(crate) struct ResolvedAddressCollection<A, B> {
     backoff_template: B,
     cursor: usize,
@@ -187,6 +200,24 @@ where
 
     pub(crate) fn mark_success(&mut self, i: AddressSlot) {
         self.v[i.0].mark_success()
+    }
+
+    #[cfg(feature = "diag")]
+    pub(crate) fn diag_list(&self) -> impl Iterator<Item = String> + '_ {
+        let cursor = if self.cursor >= self.v.len() {
+            0
+        } else {
+            self.cursor
+        };
+        self.v
+            .iter()
+            .enumerate()
+            .map(move |(i, a)| a.diag(i == cursor))
+    }
+
+    #[cfg(feature = "diag")]
+    pub(crate) fn diag_get_address(&self, i: AddressSlot) -> &A {
+        &self.v[i.0].addr
     }
 }
 

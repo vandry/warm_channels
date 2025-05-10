@@ -249,10 +249,11 @@ enum AddOrWait<A> {
     Add(PoolMemberKey, Subchannel, A),
 }
 
-enum PoolRegulatorAction {
+enum PoolRegulatorAction<DR> {
     NoAction,
     PleaseDrop(PoolMemberKey),
     PleaseDropUnhealthies,
+    Diag(DR),
 }
 
 impl<A, B, HR, L> PoolRegulator<A, B, HR, L>
@@ -353,7 +354,11 @@ where
         }
     }
 
-    fn accept_health_report(&mut self, s: &mut Subchannel, healthy: bool) -> PoolRegulatorAction {
+    fn accept_health_report<DR>(
+        &mut self,
+        s: &mut Subchannel,
+        healthy: bool,
+    ) -> PoolRegulatorAction<DR> {
         if healthy {
             if !s.ever_healthy {
                 s.ever_healthy = true;
@@ -379,11 +384,11 @@ where
         PoolRegulatorAction::NoAction
     }
 
-    fn accept_resolution_update<RSE: std::error::Error>(
+    fn accept_resolution_update<RSE: std::error::Error, DR>(
         &mut self,
         r: Option<Result<Vec<A>, RSE>>,
         distress: bool,
-    ) -> PoolRegulatorAction {
+    ) -> PoolRegulatorAction<DR> {
         match r {
             Some(Ok(addrs)) => self.addresses.new_addresses(addrs),
             Some(Err(e)) => {
@@ -402,7 +407,10 @@ where
         PoolRegulatorAction::NoAction
     }
 
-    fn accept_message(&mut self, m: InventoryReport<'_, Subchannel, bool>) -> PoolRegulatorAction {
+    fn accept_message<DR>(
+        &mut self,
+        m: InventoryReport<'_, Subchannel, bool>,
+    ) -> PoolRegulatorAction<DR> {
         match m {
             InventoryReport::Message(s, healthy) => self.accept_health_report(s, healthy),
             InventoryReport::Dropped(s) => self.connection_dropped(s),
@@ -456,7 +464,7 @@ where
         }
     }
 
-    fn connection_dropped(&mut self, s: Subchannel) -> PoolRegulatorAction {
+    fn connection_dropped<DR>(&mut self, s: Subchannel) -> PoolRegulatorAction<DR> {
         self.n_subchannels_have -= 1;
         if s.healthy {
             self.dec_healthy();
@@ -481,6 +489,69 @@ where
     }
 }
 
+#[cfg(not(feature = "diag"))]
+mod no_diag {
+    use std::task::{Context, Poll};
+
+    pub(super) struct NoDiagReports;
+
+    impl std::future::Future for NoDiagReports {
+        type Output = ();
+
+        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            Poll::Pending
+        }
+    }
+
+    impl futures::future::FusedFuture for NoDiagReports {
+        fn is_terminated(&self) -> bool {
+            true
+        }
+    }
+}
+
+#[cfg(feature = "diag")]
+fn make_diag_report<A, B, HR, L, R>(
+    id: usize,
+    want_full: bool,
+    regulator: &PoolRegulator<A, B, HR, L>,
+    subchannels: &Inventory<Subchannel, R>,
+) -> Box<crate::diag::Report>
+where
+    A: std::hash::Hash + std::fmt::Debug + Eq + Clone,
+    B: Backoff + Clone + std::fmt::Debug,
+    L: AsRef<str>,
+{
+    crate::diag::Report {
+        id,
+        label: regulator.label.as_ref().to_owned(),
+        more: if want_full {
+            Some(crate::diag::FullReport {
+                resolved_addresses: regulator.addresses.diag_list().collect(),
+                subchannels: subchannels
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "Connected to {:?}, {}",
+                            regulator.addresses.diag_get_address(s.address_index),
+                            if s.healthy {
+                                "healthy"
+                            } else if s.ever_healthy {
+                                "unhealthy"
+                            } else {
+                                "never healthy"
+                            }
+                        )
+                    })
+                    .collect(),
+            })
+        } else {
+            None
+        },
+    }
+    .into()
+}
+
 pub(crate) fn balancer_pool<A, B, HR, M, RS, RSE, L>(
     mut config: PoolConfig,
     label: L,
@@ -503,10 +574,16 @@ where
     }
     let mut subchannels = Inventory::new(config.n_subchannels_max);
     let mut regulator = PoolRegulator::new(config, backoff, healthy_callback, label);
+    #[cfg(feature = "diag")]
+    let mut diag_root = crate::diag::add_channel();
 
     stream! {
         let mut resolv = pin!(resolv.fuse());
         let mut first_connect = true;
+        #[cfg(feature = "diag")]
+        let mut report_requested = diag_root.wait_for_report_requested();
+        #[cfg(not(feature = "diag"))]
+        let mut report_requested = no_diag::NoDiagReports;
         loop {
             let (distress, add_wait) = match regulator.maybe_add() {
                 AddOrWait::Wait(r) => r,
@@ -530,6 +607,7 @@ where
                     _ = log_unhealthy => PoolRegulatorAction::NoAction,
                     r = resolv.next() => regulator.accept_resolution_update(r, distress),
                     report = reporter => regulator.accept_message(report),
+                    diag_report = report_requested => PoolRegulatorAction::Diag(diag_report),
                 }
             };
             match action {
@@ -546,6 +624,14 @@ where
                         }
                     }
                 }
+                #[cfg(feature = "diag")]
+                PoolRegulatorAction::Diag(diag_report) => {
+                    let (unique, want_full) = (diag_report.unique(), diag_report.want_full());
+                    diag_report.send(make_diag_report(unique, want_full, &regulator, &subchannels));
+                    report_requested = diag_root.wait_for_report_requested();
+                }
+                #[cfg(not(feature = "diag"))]
+                PoolRegulatorAction::Diag(_) => (),
             }
         }
     }

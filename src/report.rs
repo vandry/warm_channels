@@ -123,6 +123,14 @@ impl<D, R> Inventory<D, R> {
             InventoryEntry::Occupied(ref mut e) => Some(e),
         })
     }
+
+    #[cfg(feature = "diag")]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &D> + '_ {
+        self.entries.iter().filter_map(|e| match e {
+            InventoryEntry::Vacant(_) => None,
+            InventoryEntry::Occupied(ref e) => Some(e),
+        })
+    }
 }
 
 #[cfg(test)]

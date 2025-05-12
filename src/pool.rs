@@ -2,18 +2,18 @@ use async_stream::stream;
 use backoff::backoff::Backoff;
 use futures::future::Either;
 use futures::{FutureExt, Stream, StreamExt, select};
-use humantime::{format_duration, format_rfc3339};
+use humantime::format_duration;
 use std::future::Future;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use thiserror::Error;
 use tower::discover::Change;
 
-use crate::PoolMemberMaker;
 use crate::addresses::{AddressSlot, ResolvedAddressChoice, ResolvedAddressCollection};
 use crate::report::{Inventory, InventoryReport};
+use crate::{LoggedEvent, PoolMemberMaker};
 
 /// Configuration parameters for load-balanced channels.
 #[derive(Clone, Debug)]
@@ -73,53 +73,17 @@ enum BalancerPoolErrorKind {
     ConnectionError(String),
 }
 
-#[derive(Clone, Debug)]
-struct BalancerPoolError {
-    timestamp: SystemTime,
-    kind: BalancerPoolErrorKind,
-    count: usize,
-}
-
-impl BalancerPoolError {
-    fn new(e: BalancerPoolErrorKind) -> Self {
-        Self {
-            timestamp: SystemTime::now(),
-            kind: e,
-            count: 1,
-        }
-    }
-
-    fn repeat(&mut self) {
-        self.count += 1;
-        self.timestamp = SystemTime::now();
-    }
-}
-
-impl std::fmt::Display for BalancerPoolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} (repeated {} times, last one at {})",
-            self.kind,
-            self.count,
-            format_rfc3339(self.timestamp)
-        )
-    }
-}
-
-impl std::error::Error for BalancerPoolError {}
-
 #[derive(Debug)]
 pub(crate) struct PoolCommon {
     critically_unhealthy: AtomicBool,
-    last_error: std::sync::Mutex<Option<BalancerPoolError>>,
+    last_error: std::sync::Mutex<Option<LoggedEvent<BalancerPoolErrorKind>>>,
 }
 
 impl PoolCommon {
     fn new() -> Self {
         PoolCommon {
             critically_unhealthy: AtomicBool::new(false),
-            last_error: std::sync::Mutex::new(Some(BalancerPoolError::new(
+            last_error: std::sync::Mutex::new(Some(LoggedEvent::new(
                 BalancerPoolErrorKind::NotYetResolved,
             ))),
         }
@@ -127,13 +91,9 @@ impl PoolCommon {
 
     fn set_error(&self, e: BalancerPoolErrorKind) {
         let mut locked = self.last_error.lock().unwrap();
-        if let Some(ref mut old) = *locked {
-            if old.kind == e {
-                old.repeat();
-                return;
-            }
+        if let Some(replacement) = LoggedEvent::new(e).deduplicate(locked.as_mut()) {
+            *locked = Some(replacement);
         }
-        *locked = Some(BalancerPoolError::new(e));
     }
 
     fn reset_error(&self) {
@@ -176,12 +136,21 @@ pub struct PoolMemberKey(u64);
 
 pub(crate) type DiscoverItem<LLS> = Result<Change<PoolMemberKey, LLS>, std::convert::Infallible>;
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum ConnectionReport {
+    Connected,
+    Unhealthy(LoggedEvent<String>),
+    Healthy,
+    ConnectionError(LoggedEvent<String>),
+}
+
 #[derive(Debug)]
 struct Subchannel {
     key: Option<PoolMemberKey>,
     address_index: AddressSlot,
     healthy: bool,
     ever_healthy: bool,
+    connected: bool,
 }
 
 impl Subchannel {
@@ -191,6 +160,7 @@ impl Subchannel {
             address_index,
             healthy: false,
             ever_healthy: false,
+            connected: false,
         }
     }
 }
@@ -354,31 +324,41 @@ where
         }
     }
 
-    fn accept_health_report<DR>(
+    fn accept_connection_report<DR>(
         &mut self,
         s: &mut Subchannel,
-        healthy: bool,
+        report: ConnectionReport,
     ) -> PoolRegulatorAction<DR> {
-        if healthy {
-            if !s.ever_healthy {
-                s.ever_healthy = true;
-                self.addresses.mark_success(s.address_index);
-            }
-            if !s.healthy {
-                s.healthy = true;
-                if self.inc_healthy() {
-                    return PoolRegulatorAction::PleaseDropUnhealthies;
+        match report {
+            ConnectionReport::Healthy => {
+                if !s.ever_healthy {
+                    s.ever_healthy = true;
+                    self.addresses.mark_success(s.address_index);
+                }
+                if !s.healthy {
+                    s.healthy = true;
+                    if self.inc_healthy() {
+                        return PoolRegulatorAction::PleaseDropUnhealthies;
+                    }
                 }
             }
-        } else {
-            if s.healthy {
-                s.healthy = false;
-                self.dec_healthy();
-            }
-            if !self.critically_unhealthy {
-                if let Some(key) = s.key.take() {
-                    return PoolRegulatorAction::PleaseDrop(key);
+            ConnectionReport::Unhealthy(e) => {
+                if s.healthy {
+                    s.healthy = false;
+                    self.dec_healthy();
                 }
+                if !self.critically_unhealthy {
+                    if let Some(key) = s.key.take() {
+                        return PoolRegulatorAction::PleaseDrop(key);
+                    }
+                }
+                self.addresses.log_error(s.address_index, e);
+            }
+            ConnectionReport::ConnectionError(e) => {
+                self.addresses.log_error(s.address_index, e);
+            }
+            ConnectionReport::Connected => {
+                s.connected = true;
             }
         }
         PoolRegulatorAction::NoAction
@@ -409,10 +389,10 @@ where
 
     fn accept_message<DR>(
         &mut self,
-        m: InventoryReport<'_, Subchannel, bool>,
+        m: InventoryReport<'_, Subchannel, ConnectionReport>,
     ) -> PoolRegulatorAction<DR> {
         match m {
-            InventoryReport::Message(s, healthy) => self.accept_health_report(s, healthy),
+            InventoryReport::Message(s, r) => self.accept_connection_report(s, r),
             InventoryReport::Dropped(s) => self.connection_dropped(s),
         }
     }
@@ -532,18 +512,26 @@ where
                     .iter()
                     .map(|s| {
                         format!(
-                            "Connected to {:?}, {}",
+                            "{} to {:?}, {}",
+                            if s.connected {
+                                "Connected"
+                            } else {
+                                "Connecting"
+                            },
                             regulator.addresses.diag_get_address(s.address_index),
                             if s.healthy {
                                 "healthy"
                             } else if s.ever_healthy {
                                 "unhealthy"
-                            } else {
+                            } else if s.connected {
                                 "never healthy"
+                            } else {
+                                "connection in progress"
                             }
                         )
                     })
                     .collect(),
+                n_subchannels_want: regulator.config.n_subchannels_want,
             })
         } else {
             None
@@ -660,7 +648,7 @@ mod tests {
     };
 
     struct TestConnection {
-        reporter_fut: Pin<Box<dyn Future<Output = Reporter<bool>> + Send>>,
+        reporter_fut: Pin<Box<dyn Future<Output = Reporter<ConnectionReport>> + Send>>,
         common: Option<Arc<PoolCommon>>,
     }
 
@@ -697,7 +685,7 @@ mod tests {
             _: usize,
         ) -> Self::Connection
         where
-            F: Future<Output = Reporter<bool>> + Send + 'static,
+            F: Future<Output = Reporter<ConnectionReport>> + Send + 'static,
         {
             TestConnection {
                 reporter_fut: Box::pin(reporter_fut),
@@ -743,7 +731,7 @@ mod tests {
             }
         }
 
-        async fn expect_connection(&mut self) -> (PoolMemberKey, Reporter<bool>) {
+        async fn expect_connection(&mut self) -> (PoolMemberKey, Reporter<ConnectionReport>) {
             match poll!(self.discover.next()) {
                 Poll::Ready(Some(Ok(Change::Insert(key, mut connection)))) => {
                     self.common = connection.common.take();
@@ -765,8 +753,12 @@ mod tests {
             let locked = common.last_error.lock().unwrap();
             match *locked {
                 Some(ref bpe) => {
-                    assert_eq!(bpe.count, count);
-                    match bpe.kind {
+                    if count == 1 {
+                        assert_matches!(bpe.repeats, None);
+                    } else {
+                        assert_eq!(bpe.repeats.unwrap().1, count);
+                    }
+                    match bpe.e {
                         BalancerPoolErrorKind::ConnectionError(ref got) => assert_eq!(got, want),
                         ref x => panic!("Unexpected error {:?}", x),
                     }
@@ -861,9 +853,9 @@ mod tests {
         let (_k1, mut c1) = t.expect_connection().await;
         assert_matches!(
             *t.common.as_ref().unwrap().last_error.lock().unwrap(),
-            Some(BalancerPoolError {
-                count: 1,
-                kind: BalancerPoolErrorKind::NotYetConnected,
+            Some(LoggedEvent {
+                e: BalancerPoolErrorKind::NotYetConnected,
+                repeats: None,
                 ..
             })
         );
@@ -881,15 +873,15 @@ mod tests {
         // Won't make another connection to the same address until the outcome
         // of the first is known.
         assert!(poll!(t.discover.next()).is_pending());
-        c1.send(true).await;
+        c1.send(ConnectionReport::Healthy).await;
 
         let (_k2, mut c2) = t.expect_connection().await;
         assert!(t.healthy().is_none()); // Need 2
         assert_matches!(
             *t.common.as_ref().unwrap().last_error.lock().unwrap(),
-            Some(BalancerPoolError {
-                count: 1,
-                kind: BalancerPoolErrorKind::NotYetConnected,
+            Some(LoggedEvent {
+                repeats: None,
+                e: BalancerPoolErrorKind::NotYetConnected,
                 ..
             })
         );
@@ -902,7 +894,7 @@ mod tests {
             false
         );
         assert!(poll!(t.discover.next()).is_pending());
-        c2.send(true).await;
+        c2.send(ConnectionReport::Healthy).await;
 
         let (_k3, mut c3) = t.expect_connection().await;
 
@@ -920,7 +912,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        c3.send(true).await;
+        c3.send(ConnectionReport::Healthy).await;
         // No more, we already have the wanted number.
         assert!(poll!(t.discover.next()).is_pending());
 
@@ -944,9 +936,10 @@ mod tests {
         let (_k1, mut c1) = t.expect_connection().await;
         let (_k2, mut c2) = t.expect_connection().await;
         let (k3, mut c3) = t.expect_connection().await;
-        c1.send(true).await;
-        c2.send(true).await;
-        c3.send(false).await;
+        c1.send(ConnectionReport::Healthy).await;
+        c2.send(ConnectionReport::Healthy).await;
+        c3.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
         t.expect_drop(k3).await;
         std::mem::drop(c3);
         let (_k4, _c4) = t.expect_connection().await;
@@ -972,9 +965,11 @@ mod tests {
         let (_k1, mut c1) = t.expect_connection().await;
         let (k2, mut c2) = t.expect_connection().await;
         let (k3, mut c3) = t.expect_connection().await;
-        c1.send(true).await;
-        c2.send(false).await;
-        c3.send(false).await;
+        c1.send(ConnectionReport::Healthy).await;
+        c2.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
+        c3.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
         t.expect_drop(k2).await;
         std::mem::drop(c2);
         t.expect_drop(k3).await;
@@ -999,9 +994,12 @@ mod tests {
         let (k1, mut c1) = t.expect_connection().await;
         let (k2, mut c2) = t.expect_connection().await;
         let (k3, mut c3) = t.expect_connection().await;
-        c1.send(false).await;
-        c2.send(false).await;
-        c3.send(false).await;
+        c1.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
+        c2.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
+        c3.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
         // Critical unhealthy mode does not engage unless we have been
         // once above the threshold.
         t.expect_drop(k1).await;
@@ -1031,13 +1029,14 @@ mod tests {
         let (k1, mut c1) = t.expect_connection().await;
         let (k2, mut c2) = t.expect_connection().await;
         let (k3, mut c3) = t.expect_connection().await;
-        c1.send(true).await;
-        c2.send(true).await;
-        c3.send(true).await;
+        c1.send(ConnectionReport::Healthy).await;
+        c2.send(ConnectionReport::Healthy).await;
+        c3.send(ConnectionReport::Healthy).await;
         // Nothing more to do for now.
 
         // First becomes unhealthy. Drop and replace.
-        c1.send(false).await;
+        c1.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
         t.expect_drop(k1).await;
         assert_eq!(t.healthy().expect("still healthy"), true);
         assert_eq!(
@@ -1052,7 +1051,8 @@ mod tests {
         let (_k4, _c4) = t.expect_connection().await;
 
         // Second becomes unhealthy. Drop and replace.
-        c2.send(false).await;
+        c2.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
         t.expect_drop(k2).await;
         assert_eq!(t.healthy().expect("not healthy anymore"), false);
         assert_eq!(
@@ -1067,7 +1067,8 @@ mod tests {
         let (_k5, mut c5) = t.expect_connection().await;
 
         // Third becomes unhealthy. Maintain.
-        c3.send(false).await;
+        c3.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
+            .await;
         assert!(poll!(t.discover.next()).is_pending());
         assert_eq!(t.healthy().expect("not healthy anymore"), false);
         assert_eq!(
@@ -1080,7 +1081,7 @@ mod tests {
         );
 
         // One of the new connections gets healthy.
-        c5.send(true).await;
+        c5.send(ConnectionReport::Healthy).await;
         // Now we are out of critically unhealthy mode and can drop the unhealthy.
         t.expect_drop(k3).await;
     }
@@ -1091,8 +1092,8 @@ mod tests {
         let (_k1, mut c1) = t.expect_connection().await;
         let (_k2, mut c2) = t.expect_connection().await;
         let (_k3, _c3) = t.expect_connection().await;
-        c1.send(true).await;
-        c2.send(true).await;
+        c1.send(ConnectionReport::Healthy).await;
+        c2.send(ConnectionReport::Healthy).await;
         assert_matches!(poll!(t.discover.next()), Poll::Pending);
         assert_eq!(t.healthy().expect("healthy"), true);
 

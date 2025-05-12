@@ -1,6 +1,13 @@
 use backoff::backoff::Backoff;
 use std::collections::HashMap;
 
+#[cfg(feature = "diag")]
+use fixed_deque::Deque;
+#[cfg(feature = "diag")]
+use humantime::format_duration;
+
+use crate::LoggedEvent;
+
 #[derive(Debug)]
 struct ResolvedAddress<A, B> {
     addr: A,
@@ -8,6 +15,8 @@ struct ResolvedAddress<A, B> {
     used_count: usize,
     backoff: B,
     next_attempt_at: Option<tokio::time::Instant>,
+    #[cfg(feature = "diag")]
+    last_errors: Deque<LoggedEvent<String>>,
 }
 
 impl<A: Clone, B: Backoff> ResolvedAddress<A, B> {
@@ -18,6 +27,8 @@ impl<A: Clone, B: Backoff> ResolvedAddress<A, B> {
             used_count: 0,
             backoff,
             next_attempt_at: None,
+            #[cfg(feature = "diag")]
+            last_errors: Deque::new(3),
         }
     }
 
@@ -52,12 +63,24 @@ impl<A: Clone, B: Backoff> ResolvedAddress<A, B> {
 #[cfg(feature = "diag")]
 impl<A: std::fmt::Debug, B> ResolvedAddress<A, B> {
     fn diag(&self, is_next: bool) -> String {
+        let mut details = self
+            .last_errors
+            .iter()
+            .map(|le| format!("<li>{}</li>\n", le))
+            .collect::<Vec<_>>();
+        if let Some(moment) = self.next_attempt_at {
+            details.push(format!(
+                "<li>Backoff: try this address again after {}</li>\n",
+                format_duration(moment.duration_since(tokio::time::Instant::now()))
+            ));
+        }
         format!(
-            "{:?}{}, currently used by {} connections{}",
-            self.addr,
+            "<li>{}{}, currently used by {} connections{}<ul>{}</ul></li>",
+            html_escape::encode_text(&format!("{:?}", self.addr)),
             if self.resolved { "" } else { ", stale" },
             self.used_count,
-            if is_next { ", use next" } else { "" }
+            if is_next { ", use next" } else { "" },
+            details.join(""),
         )
     }
 }
@@ -218,6 +241,15 @@ where
     #[cfg(feature = "diag")]
     pub(crate) fn diag_get_address(&self, i: AddressSlot) -> &A {
         &self.v[i.0].addr
+    }
+
+    pub(crate) fn log_error(&mut self, i: AddressSlot, e: LoggedEvent<String>) {
+        #[cfg(feature = "diag")]
+        if let Some(to_add) = e.deduplicate(self.v[i.0].last_errors.front_mut()) {
+            self.v[i.0].last_errors.push_front(to_add);
+        }
+        #[cfg(not(feature = "diag"))]
+        let _ = (i, e);
     }
 }
 

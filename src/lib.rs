@@ -136,8 +136,10 @@
 #[macro_use]
 extern crate assert_matches;
 
+use humantime::format_rfc3339;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tower_service::Service;
 
@@ -226,7 +228,52 @@ trait PoolMemberMaker<A> {
         address: A,
     ) -> Self::Connection
     where
-        F: Future<Output = report::Reporter<bool>> + Send + 'static;
+        F: Future<Output = report::Reporter<pool::ConnectionReport>> + Send + 'static;
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct LoggedEvent<E> {
+    original_timestamp: SystemTime,
+    e: E,
+    repeats: Option<(SystemTime, usize)>,
+}
+
+impl<E: PartialEq> LoggedEvent<E> {
+    pub(crate) fn new(e: E) -> Self {
+        Self {
+            original_timestamp: SystemTime::now(),
+            e,
+            repeats: None,
+        }
+    }
+
+    pub(crate) fn deduplicate(self, against: Option<&mut Self>) -> Option<Self> {
+        match against {
+            Some(other) if other.e == self.e => {
+                other.repeats = match other.repeats {
+                    Some((_, count)) => Some((self.original_timestamp, count + 1)),
+                    None => Some((self.original_timestamp, 2)),
+                };
+                None
+            }
+            _ => Some(self),
+        }
+    }
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for LoggedEvent<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "{}: {}", format_rfc3339(self.original_timestamp), self.e)?;
+        if let Some((most_recent, count)) = self.repeats {
+            write!(
+                f,
+                " (repeated {} times, most recently at {})",
+                count,
+                format_rfc3339(most_recent)
+            )?;
+        }
+        Ok(())
+    }
 }
 
 mod addresses;

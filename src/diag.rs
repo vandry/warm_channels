@@ -16,6 +16,7 @@ const REPORT_TIMEOUT: Duration = Duration::from_millis(4000);
 pub struct FullReport {
     pub resolved_addresses: Vec<String>,
     pub subchannels: Vec<String>,
+    pub n_subchannels_want: usize,
 }
 
 #[derive(Debug)]
@@ -48,20 +49,26 @@ impl Report {
             </ul>
             <h3>Subchannels</h3>
             <ul>
-            {}
+            {}{}
             </ul>
             </body></html>
             "#,
             html_escape::encode_text(&self.label),
             html_escape::encode_text(&self.label),
-            more.resolved_addresses
-                .iter()
-                .map(|a| format!("<li>{}</li>\n", html_escape::encode_text(a)))
-                .join(""),
+            more.resolved_addresses.iter().join(""),
             more.subchannels
                 .iter()
                 .map(|a| format!("<li>{}</li>\n", html_escape::encode_text(a)))
-                .join("")
+                .join(""),
+            if more.n_subchannels_want > more.subchannels.len() {
+                format!(
+                    "<li>+{} additional subchannels needed to make up {} in total</li>",
+                    more.n_subchannels_want - more.subchannels.len(),
+                    more.n_subchannels_want
+                )
+            } else {
+                "".into()
+            },
         )
     }
 }

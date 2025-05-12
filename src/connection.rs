@@ -13,9 +13,9 @@ use std::task::{Context, Poll, ready};
 use thiserror::Error;
 use tower_service::Service;
 
-use crate::Connector;
-use crate::pool::PoolCommon;
+use crate::pool::{ConnectionReport, PoolCommon};
 use crate::report::Reporter;
+use crate::{Connector, LoggedEvent};
 
 struct SendRequestService<B>(SendRequest<B>);
 
@@ -153,7 +153,7 @@ where
     C::Error: Send + 'static,
     HC: crate::HealthChecker<ReqBody> + Send + Sync + 'static,
     HC::Error: std::error::Error + Clone + Send,
-    F: Future<Output = Reporter<bool>> + Send + 'static,
+    F: Future<Output = Reporter<ConnectionReport>> + Send + 'static,
     ReqBody: Body + Send + Unpin + 'static,
     ReqBody::Data: Send,
     ReqBody::Error: std::error::Error + Send + Sync + 'static,
@@ -181,10 +181,16 @@ where
         let (sender, conn) = match init_result {
             Ok(v) => v,
             Err(e) => {
+                reporter
+                    .send(ConnectionReport::ConnectionError(LoggedEvent::new(
+                        e.to_string(),
+                    )))
+                    .await;
                 let _ = sender_tx.send(Err(e));
                 return;
             }
         };
+        reporter.send(ConnectionReport::Connected).await;
         let mut begin_usage = Some((sender.clone(), sender_tx));
         let mut healthy = None;
         let mut hc_stream = pin!(
@@ -214,14 +220,14 @@ where
                             if !healthy.unwrap_or(false) {
                                 healthy = Some(true);
                                 health.set_healthy();
-                                reporter.send(true).await;
+                                reporter.send(ConnectionReport::Healthy).await;
                             }
                         }
                         Some(Err(e)) => {
                             if healthy.unwrap_or(true) {
+                                reporter.send(ConnectionReport::Unhealthy(LoggedEvent::new(e.to_string()))).await;
                                 healthy = Some(false);
                                 health.set_unhealthy(e);
-                                reporter.send(false).await;
                             }
                         }
                     }
@@ -281,7 +287,7 @@ where
         address: A,
     ) -> Self
     where
-        F: Future<Output = Reporter<bool>> + Send + 'static,
+        F: Future<Output = Reporter<ConnectionReport>> + Send + 'static,
     {
         let health = Arc::new(HTTP2ConnectionHealth::new());
         let monitor_health = Arc::clone(&health);
@@ -415,7 +421,7 @@ where
         address: A,
     ) -> Self::Connection
     where
-        F: Future<Output = Reporter<bool>> + Send + 'static,
+        F: Future<Output = Reporter<ConnectionReport>> + Send + 'static,
     {
         self.ll.layer(HTTP2Connection::new(
             Arc::clone(&self.shared),
@@ -497,17 +503,32 @@ mod tests {
         }
     }
 
-    async fn expect_health_report<D>(inv: &mut Inventory<D, bool>, name: D, want: bool)
+    async fn expect_connected<D>(inv: &mut Inventory<D, ConnectionReport>, name: D)
     where
         D: PartialEq + std::fmt::Debug,
     {
-        let m = inv.recv().await;
-        if let InventoryReport::Message(dr, got) = m {
-            assert_eq!(*dr, name);
-            assert_eq!(want, got);
-        } else {
-            panic!("got wrong message {:?}", m);
-        }
+        let dr = match inv.recv().await {
+            InventoryReport::Message(dr, ConnectionReport::Connected) => dr,
+            x => {
+                panic!("got wrong message {:?}", x);
+            }
+        };
+        assert_eq!(*dr, name);
+    }
+
+    async fn expect_health_report<D>(inv: &mut Inventory<D, ConnectionReport>, name: D, want: bool)
+    where
+        D: PartialEq + std::fmt::Debug,
+    {
+        let (dr, got) = match inv.recv().await {
+            InventoryReport::Message(dr, ConnectionReport::Healthy) => (dr, true),
+            InventoryReport::Message(dr, ConnectionReport::Unhealthy(_)) => (dr, false),
+            x => {
+                panic!("got wrong message {:?}", x);
+            }
+        };
+        assert_eq!(*dr, name);
+        assert_eq!(want, got);
     }
 
     struct TestSetup {
@@ -542,6 +563,7 @@ mod tests {
         let mut c =
             t.maker
                 .make_connection(pif.pool(), inv.allocate("foo"), TestServerAddress::Working);
+        expect_connected(&mut inv, "foo").await;
         expect_health_report(&mut inv, "foo", true).await;
         let resp = c
             .ready()
@@ -565,6 +587,7 @@ mod tests {
         let mut c =
             t.maker
                 .make_connection(pif.pool(), inv.allocate("foo"), TestServerAddress::Working);
+        expect_connected(&mut inv, "foo").await;
         expect_health_report(&mut inv, "foo", false).await;
         assert_matches!(c.ready().await, Err(HTTP2ConnectionError::Unhealthy(_)));
         // Connections don't drop themselves for being unhealthy.
@@ -596,6 +619,10 @@ mod tests {
         // The connecton gets dropped even if nobody polls it ready
         // because this status is unrecoverable and the pool will want
         // to replace it with a new connection as soon as possible.
+        assert_matches!(
+            inv.recv().await,
+            InventoryReport::Message(_, ConnectionReport::ConnectionError(_))
+        );
         assert_eq!(inv.recv().await, InventoryReport::Dropped("foo"));
     }
 
@@ -622,6 +649,7 @@ mod tests {
         let c =
             t.maker
                 .make_connection(pif.pool(), inv.allocate("foo"), TestServerAddress::Working);
+        expect_connected(&mut inv, "foo").await;
         expect_health_report(&mut inv, "foo", true).await;
         t.server.set_healthy(false);
         t.probe_again.add_permits(1);
@@ -647,6 +675,7 @@ mod tests {
         let mut c =
             t.maker
                 .make_connection(pif.pool(), inv.allocate("foo"), TestServerAddress::Working);
+        expect_connected(&mut inv, "foo").await;
         expect_health_report(&mut inv, "foo", false).await;
         pif.set_critically_unhealthy(true);
         // Unhealthy but should accept requests anyway.

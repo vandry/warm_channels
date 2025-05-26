@@ -8,11 +8,9 @@
 //!
 //! ```
 //! use std::sync::Arc;
-//! use trust_dns_resolver::system_conf::read_system_conf;
-//! use trust_dns_resolver::TokioAsyncResolver;
+//! use hickory_resolver::TokioResolver;
 //!
-//! let (resolver_config, mut resolver_opts) = read_system_conf().unwrap();
-//! let r = Arc::new(TokioAsyncResolver::tokio(resolver_config, resolver_opts));
+//! let r = Arc::new(TokioResolver::builder_tokio().unwrap().build());
 //! let uri = "https://example.org".try_into().unwrap();
 //! let stream = warm_channels::resolve_uri(&uri, r);
 //! ```
@@ -30,8 +28,7 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
-use trust_dns_resolver::TokioAsyncResolver;
-use trust_dns_resolver::error::ResolveError;
+use hickory_resolver::{ResolveError, TokioResolver};
 
 const MIN_TTL: Duration = Duration::from_millis(10000);
 
@@ -46,7 +43,7 @@ pub trait Resolve {
     ) -> impl Future<Output = Result<(Duration, Vec<SocketAddr>), Self::Error>> + Send;
 }
 
-impl Resolve for TokioAsyncResolver {
+impl Resolve for TokioResolver {
     type Error = ResolveError;
 
     fn resolve(
@@ -114,7 +111,7 @@ fn ip_literal(s: &str) -> Option<IpAddr> {
 }
 
 /// Error type returned for immediate failures by [`resolve_uri`].
-/// Later errors during resolution give [`trust_dns_resolver`]'s
+/// Later errors during resolution give [`hickory_resolver`]'s
 /// [`ResolveError`] type.
 #[derive(Debug, Error)]
 pub enum ResolveUriError {
@@ -126,7 +123,7 @@ pub enum ResolveUriError {
     WrongScheme(Uri),
 }
 
-/// Given a [`TokioAsyncResolver`] and a URI, produce a [`Stream`] of resolved
+/// Given a [`TokioResolver`] and a URI, produce a [`Stream`] of resolved
 /// address updates for that URI. See the module-level documentation.
 pub fn resolve_uri<'a, R, RR>(
     uri: &Uri,

@@ -4,12 +4,10 @@
 //!
 //! ```
 //! use std::sync::Arc;
-//! use trust_dns_resolver::system_conf::read_system_conf;
-//! use trust_dns_resolver::TokioAsyncResolver;
+//! use hickory_resolver::TokioResolver;
 //!
 //! # tokio_test::block_on(async {
-//! let (resolver_config, mut resolver_opts) = read_system_conf().unwrap();
-//! let r = Arc::new(TokioAsyncResolver::tokio(resolver_config, resolver_opts));
+//! let r = Arc::new(TokioResolver::builder_tokio().unwrap().build());
 //! let uri = "https://example.org".try_into().unwrap();
 //! let stream = warm_channels::resolve_uri(&uri, r).unwrap();
 //! let (stack, worker) = warm_channels::grpc_channel(

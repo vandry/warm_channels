@@ -347,12 +347,12 @@ where
                     s.healthy = false;
                     self.dec_healthy();
                 }
+                self.addresses.log_error(s.address_index, e);
                 if !self.critically_unhealthy {
                     if let Some(key) = s.key.take() {
                         return PoolRegulatorAction::PleaseDrop(key);
                     }
                 }
-                self.addresses.log_error(s.address_index, e);
             }
             ConnectionReport::ConnectionError(e) => {
                 self.addresses.log_error(s.address_index, e);

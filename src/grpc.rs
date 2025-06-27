@@ -186,16 +186,16 @@ impl crate::HealthChecker<BoxBody> for GRPCHealthChecker {
 /// [`tower_service::Service`] with [`BoxBody`] as the HTTP request body
 /// as required for wrapping a [`tonic`] gRPC client arount it.
 #[cfg(feature = "metrics")]
-pub type GRPCChannel<A, C> = crate::channel::Channel<
+pub type GRPCChannel<A, C, HC = GRPCHealthChecker> = crate::channel::Channel<
     tonic_prometheus_layer::MetricsChannel<
-        crate::channel::PoolService<A, BoxBody, C, GRPCHealthChecker>,
+        crate::channel::PoolService<A, BoxBody, C, HC>,
     >,
     BoxBody,
 >;
 
 #[cfg(not(feature = "metrics"))]
-pub type GRPCChannel<A, C> =
-    crate::channel::Channel<crate::channel::PoolService<A, BoxBody, C, GRPCHealthChecker>, BoxBody>;
+pub type GRPCChannel<A, C, HC = GRPCHealthChecker> =
+    crate::channel::Channel<crate::channel::PoolService<A, BoxBody, C, HC>, BoxBody>;
 
 /// Create a new always-ready load-balanced gRPC client channel.
 ///

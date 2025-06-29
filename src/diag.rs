@@ -212,8 +212,11 @@ mod tests {
         )
     }
 
+    static ONE_TEST_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test(start_paused = true)]
     async fn channel_list() {
+        let exclusive = ONE_TEST_AT_A_TIME.lock().await;
         let (_c, worker) = test_channel("test-channel-channel_list");
         let mut worker = pin!(worker.fuse());
         let mut req = pin!(
@@ -231,10 +234,12 @@ mod tests {
                 assert!(r.unwrap().into_body().contains("test-channel-channel_list"));
             }
         }
+        drop(exclusive);
     }
 
     #[tokio::test(start_paused = true)]
     async fn channel_does_not_respond() {
+        let exclusive = ONE_TEST_AT_A_TIME.lock().await;
         let (_c, _worker) = test_channel("test-channel-channel_does_not_respond");
         let mut req = pin!(
             ChannelDiagService::default()
@@ -253,10 +258,12 @@ mod tests {
                 .into_body()
                 .contains("channels that failed to report")
         );
+        drop(exclusive);
     }
 
     #[tokio::test(start_paused = true)]
     async fn channel_details() {
+        let exclusive = ONE_TEST_AT_A_TIME.lock().await;
         let (_c, worker) = test_channel("test-channel-channel_details");
         let mut worker = pin!(worker.fuse());
         let mut test = pin!(
@@ -291,5 +298,6 @@ mod tests {
             "want body with Working, got {:?}",
             body
         );
+        drop(exclusive);
     }
 }

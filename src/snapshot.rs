@@ -50,7 +50,7 @@ const DELIVERED: usize = 1;
 const FULL_REPORT: usize = 2;
 const ALL_FLAGS: usize = DELIVERED | FULL_REPORT;
 
-#[derive(Debug)]
+// Do not derive Debug: it might take the TryLocks at the wrong moment.
 struct SharedEntry<R> {
     in_use_or_next_free: AtomicUsize,
     report_gen: AtomicUsize,
@@ -74,7 +74,6 @@ fn try_park(w: &TryLock<Option<Waker>>, cx: &mut Context<'_>) {
 
 pub struct WaitForReportRequested<'a, 'b, R>(Option<&'a mut Entry<'b, R>>);
 
-#[derive(Debug)]
 pub struct ReportRequest<'a, 'b, R>(&'a mut Entry<'b, R>, usize);
 
 impl<R> ReportRequest<'_, '_, R> {
@@ -151,21 +150,25 @@ impl<R> Future for WaitForReportAvailable<'_, R> {
 
 impl<R> Drop for WaitForReportAvailable<'_, R> {
     fn drop(&mut self) {
-        if let Some(mut maybe_waker) = self.e.waiting_for_report.try_lock() {
-            let _ = maybe_waker.take();
-        }
+        self.e.waiting_for_report_try_wake();
     }
 }
 
 impl<R> SharedEntry<R> {
+    fn waiting_for_report_try_wake(&self) {
+        if let Some(waker) = self
+            .waiting_for_report
+            .try_lock()
+            .and_then(|mut w| w.take())
+        {
+            waker.wake();
+        }
+    }
+
     fn deliver_report(&self, report_gen: usize, report: Box<R>) {
         self.report.store(Some(report), Ordering::SeqCst);
         self.report_gen.store(report_gen, Ordering::SeqCst);
-        if let Some(mut maybe_waker) = self.waiting_for_report.try_lock() {
-            if let Some(waker) = maybe_waker.take() {
-                waker.wake();
-            }
-        }
+        self.waiting_for_report_try_wake();
     }
 
     async fn request_report(&self, owner: &Collection<R>, i: usize, full: bool) -> Option<Box<R>> {
@@ -231,13 +234,11 @@ impl<R> SharedEntry<R> {
     }
 }
 
-#[derive(Debug)]
 pub struct Collection<R> {
     next_free: AtomicUsize,
     entries: boxcar::Vec<SharedEntry<R>>,
 }
 
-#[derive(Debug)]
 pub struct Entry<'a, R> {
     owner: &'a Collection<R>,
     e: &'a SharedEntry<R>,
@@ -257,11 +258,7 @@ impl<R> Drop for Entry<'_, R> {
         if report_gen > self.already_delivered {
             // A report is presently being requested. Wake the waiter and let
             // it free us.
-            if let Some(mut maybe_waker) = self.e.waiting_for_report.try_lock() {
-                if let Some(waker) = maybe_waker.take() {
-                    waker.wake();
-                }
-            }
+            self.e.waiting_for_report_try_wake();
         } else {
             self.owner.free_entry(self.e, self.i);
         }
@@ -286,6 +283,11 @@ impl<R> Collection<R> {
             let next_next_free = self.entries[next_free]
                 .in_use_or_next_free
                 .load(Ordering::SeqCst);
+            if next_next_free & ENTRY_IN_USE == ENTRY_IN_USE {
+                // We lost the race: somebody already claimed next_free.
+                next_free = self.next_free.load(Ordering::Acquire);
+                continue;
+            }
             match self.next_free.compare_exchange_weak(
                 next_free,
                 next_next_free,
@@ -296,6 +298,9 @@ impl<R> Collection<R> {
                     self.entries[next_free]
                         .in_use_or_next_free
                         .store(ENTRY_IN_USE | unique, Ordering::Relaxed);
+                    self.entries[next_free]
+                        .report_gen
+                        .store(DELIVERED, Ordering::Release);
                     break next_free;
                 }
                 Err(replacement_next_free) => {
@@ -461,7 +466,7 @@ mod tests {
             }
             .await;
             let mut w_more = e.wait_for_report_requested();
-            assert_matches!(poll!(Pin::new(&mut w_more)), Poll::Pending);
+            assert!(poll!(Pin::new(&mut w_more)).is_pending());
             e
         });
         let reporter2 = pin!(async {

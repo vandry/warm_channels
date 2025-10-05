@@ -121,7 +121,12 @@ impl<T> TLSConnector<T> {
             c.enable_sni = false;
             ServerName::try_from("spiffe").unwrap()
         } else {
-            ServerName::try_from(uri.host().unwrap_or_default())?
+            let host = uri.host().unwrap_or_default();
+            if host == "_" {
+                // Placeholder to mean no hostname is available.
+                c.enable_sni = false;
+            }
+            ServerName::try_from(host)?
         };
         Ok(Self {
             inner,

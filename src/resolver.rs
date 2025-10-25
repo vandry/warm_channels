@@ -21,7 +21,7 @@
 //! addresses changes.
 
 use async_stream::stream;
-use backoff::{ExponentialBackoff, backoff::Backoff};
+use backoff::backoff::Backoff;
 use futures::{Stream, StreamExt, TryFutureExt};
 use hickory_resolver::{ResolveError, TokioResolver};
 use http::Uri;
@@ -71,7 +71,7 @@ where
     R::Error: Send,
 {
     stream! {
-        let mut backoff = ExponentialBackoff::default();
+        let mut backoff = crate::default_backoff();
         loop {
             match resolver.as_ref().resolve(&name, port).await {
                 Ok((mut ttl, addrs)) => {

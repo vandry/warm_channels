@@ -113,7 +113,7 @@ where
                 PendingRequests::new(s, tower::load::completion::CompleteOnResponse::default())
             }),
         ),
-        backoff::ExponentialBackoff::default(),
+        crate::default_backoff(),
         healthy_callback,
         resolution_stream,
     );

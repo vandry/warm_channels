@@ -277,6 +277,12 @@ impl<E: std::fmt::Display> std::fmt::Display for LoggedEvent<E> {
     }
 }
 
+fn default_backoff() -> backoff::ExponentialBackoff {
+    backoff::ExponentialBackoffBuilder::new()
+        .with_max_elapsed_time(None) // Never completely give up.
+        .build()
+}
+
 mod addresses;
 mod balance_driver;
 mod channel;

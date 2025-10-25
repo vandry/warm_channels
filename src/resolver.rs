@@ -23,12 +23,12 @@
 use async_stream::stream;
 use backoff::{ExponentialBackoff, backoff::Backoff};
 use futures::{Stream, StreamExt, TryFutureExt};
+use hickory_resolver::{ResolveError, TokioResolver};
 use http::Uri;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 use thiserror::Error;
-use hickory_resolver::{ResolveError, TokioResolver};
 
 const MIN_TTL: Duration = Duration::from_millis(10000);
 

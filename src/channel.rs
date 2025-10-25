@@ -126,7 +126,7 @@ impl<S, ReqBody> Channel<S, ReqBody>
 where
     ReqBody: Send,
     S: Service<http::Request<ReqBody>> + Send + 'static,
-    S::Error: Into<Box<(dyn std::error::Error + std::marker::Send + Sync + 'static)>> + Send + Sync,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync + 'static>> + Send + Sync,
     S::Future: Send + 'static,
 {
     /// Create a new top-level cloneable channel.
@@ -148,7 +148,7 @@ where
     ReqBody: Send,
     S: Service<http::Request<ReqBody>>,
     // This is what tower::buffer::Buffer requires. Note not std::error::Error!
-    S::Error: Into<Box<(dyn std::error::Error + std::marker::Send + Sync + 'static)>>,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
     S::Future: Send + 'static,
 {
     type Response = <ChannelInner<S, ReqBody> as Service<http::Request<ReqBody>>>::Response;

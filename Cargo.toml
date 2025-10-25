@@ -52,8 +52,8 @@ unix = []
 
 [dev-dependencies]
 assert_matches = "1.5"
-comprehensive = "0.7.1"
-comprehensive_grpc = "0.6.4"
+comprehensive = "0.8"
+comprehensive_grpc = "0.8"
 hyper = { version = "1.5", features = ["client", "http2", "server"] }
 testing_logger = "0.1"
 tokio-stream = "0.1"

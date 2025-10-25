@@ -55,7 +55,7 @@ use crate::eitherio::EitherIO;
 #[derive(Debug)]
 enum TLSConnectorStyle {
     Plain,
-    TLS(ServerName<'static>, Arc<ClientConfig>),
+    Tls(ServerName<'static>, Arc<ClientConfig>),
 }
 
 /// A [`Connector`] that optionally wraps another one with a TLS client.
@@ -130,7 +130,7 @@ impl<T> TLSConnector<T> {
         };
         Ok(Self {
             inner,
-            style: TLSConnectorStyle::TLS(name.to_owned(), Arc::new(c)),
+            style: TLSConnectorStyle::Tls(name.to_owned(), Arc::new(c)),
         })
     }
 }
@@ -164,7 +164,7 @@ where
             TLSConnectorStyle::Plain => {
                 Either::Left(inner.map_ok(|io| EitherIO::Left { inner: io }))
             }
-            TLSConnectorStyle::TLS(ref name, ref config) => {
+            TLSConnectorStyle::Tls(ref name, ref config) => {
                 let name = name.clone();
                 let config = Arc::clone(config);
                 Either::Right(inner.and_then(move |io| {
@@ -218,7 +218,7 @@ mod tests {
         let uri = Uri::try_from("https://example.org").unwrap();
         let c = TLSConnector::new((), &uri, Some(&conf)).unwrap();
         match c.style {
-            TLSConnectorStyle::TLS(ServerName::DnsName(sn), co) => {
+            TLSConnectorStyle::Tls(ServerName::DnsName(sn), co) => {
                 assert_eq!(sn.as_ref(), "example.org");
                 assert!(co.enable_sni);
             }
@@ -230,7 +230,7 @@ mod tests {
         let uri = Uri::try_from("spiffe://example.org").unwrap();
         let c = TLSConnector::new((), &uri, Some(&conf)).unwrap();
         match c.style {
-            TLSConnectorStyle::TLS(ServerName::DnsName(sn), co) => {
+            TLSConnectorStyle::Tls(ServerName::DnsName(sn), co) => {
                 assert_eq!(sn.as_ref(), "spiffe");
                 assert!(!co.enable_sni);
             }

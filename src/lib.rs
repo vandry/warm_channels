@@ -128,6 +128,9 @@
 //! [`tonic`]: https://docs.rs/tonic/latest/tonic/
 //! [gRPC hello world client example]: https://github.com/vandry/comprehensive/blob/master/examples/src/helloworld-grpc-client.rs
 
+// Would impose a requirement for rustc 1.88
+// https://github.com/rust-lang/rust/pull/132833
+#![allow(clippy::collapsible_if)]
 #![warn(missing_docs)]
 
 #[cfg(test)]

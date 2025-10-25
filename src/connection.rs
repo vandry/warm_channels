@@ -315,6 +315,7 @@ where
     HC: crate::HealthChecker<ReqBody> + Send + Sync + 'static,
     HC::Error: std::error::Error + Clone + Send,
 {
+    #[allow(clippy::type_complexity)]
     fn poll_connect(
         &mut self,
         cx: &mut Context<'_>,

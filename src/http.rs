@@ -57,6 +57,7 @@ where
     ReqBody::Data: Send,
     L: AsRef<str> + Send + 'static,
 {
+    #[allow(clippy::default_constructed_unit_structs)]
     let health_checker = AssumeAlwaysHealthy::default();
     let (stack, shim_worker) = crate::channel::pool_service(
         config.pool,

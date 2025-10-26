@@ -358,4 +358,79 @@ mod tests {
             |_| (),
         );
     }
+
+    #[cfg(feature = "metrics")]
+    struct TestGrpcServer;
+
+    #[cfg(feature = "metrics")]
+    impl crate::Connector<()> for TestGrpcServer {
+        type IO = tokio::io::DuplexStream;
+        type Error = std::io::Error;
+
+        fn connect(
+            &self,
+            _: (),
+        ) -> impl Future<Output = std::io::Result<Self::IO>> + Send + Sync + 'static {
+            let (s1, s2) = tokio::io::duplex(1000);
+            let stream =
+                futures::stream::once(std::future::ready(Ok::<_, std::convert::Infallible>(s2)));
+            let (mut r, service) = tonic_health::server::health_reporter();
+            tokio::task::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(service)
+                    .serve_with_incoming(stream),
+            );
+            async move {
+                r.set_service_status("ready", tonic_health::ServingStatus::Serving)
+                    .await;
+                Ok(s1)
+            }
+        }
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test]
+    async fn metrics() {
+        use futures::pin_mut;
+        use prometheus::Encoder;
+
+        let _ = tonic_prometheus_layer::metrics::try_init_settings(
+            tonic_prometheus_layer::metrics::GlobalSettings {
+                registry: prometheus::default_registry().clone(), // Arc
+                ..Default::default()
+            },
+        );
+        let rs = futures::stream::once(futures::future::ready(Ok::<_, std::convert::Infallible>(
+            vec![()],
+        )));
+        let uri: Uri = "http://foo/".try_into().unwrap();
+        let (stack, worker) = grpc_channel(
+            uri.clone(),
+            GRPCChannelConfig::default(),
+            "test",
+            TestGrpcServer,
+            rs,
+            |_| (),
+        );
+        let mut client = HealthClient::with_origin(stack, uri);
+        pin_mut!(worker);
+        let hc = pin!(client.check(HealthCheckRequest {
+            service: String::new(),
+        }));
+        match futures::future::select(hc, worker).await {
+            Either::Left((Ok(_), _)) => (),
+            _ => {
+                panic!("expected success");
+            }
+        }
+
+        let encoder = prometheus::TextEncoder::new();
+        let metric_families = prometheus::gather();
+        let mut buffer = vec![];
+        encoder.encode(&metric_families, &mut buffer).unwrap();
+
+        assert!(
+            String::from_utf8_lossy(&buffer).contains("grpc_service=\"grpc.health.v1.Health\"")
+        );
+    }
 }

@@ -191,6 +191,9 @@ pub type GRPCChannel<A, C, HC = GRPCHealthChecker> = crate::channel::Channel<
     BoxBody,
 >;
 
+/// The type of the channel returned by [`grpc_channel`]. This implements
+/// [`tower_service::Service`] with [`BoxBody`] as the HTTP request body
+/// as required for wrapping a [`tonic`] gRPC client arount it.
 #[cfg(not(feature = "metrics"))]
 pub type GRPCChannel<A, C, HC = GRPCHealthChecker> =
     crate::channel::Channel<crate::channel::PoolService<A, BoxBody, C, HC>, BoxBody>;

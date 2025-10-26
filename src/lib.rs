@@ -64,6 +64,7 @@
 //! let r = Arc::new(TokioResolver::builder_tokio().unwrap().build());
 //! let uri = "https://example.org".try_into().unwrap();
 //! let stream = warm_channels::resolve_uri(&uri, r).unwrap();
+//! # #[cfg(feature = "grpc")]
 //! let (stack, worker) = warm_channels::grpc_channel(
 //!     uri.clone(),
 //!     warm_channels::grpc::GRPCChannelConfig::default(),
@@ -72,6 +73,7 @@
 //!     stream,
 //!     |h| println!("healthy: {}", h),
 //! );
+//! # #[cfg(feature = "grpc")]
 //! tokio::task::spawn(worker);
 //! # // Fake for demo
 //! # mod pb { pub mod test_client {
@@ -81,8 +83,10 @@
 //! #     pub async fn greet<T>(self, t: T) {}
 //! #   }
 //! # } }
+//! # #[cfg(feature = "grpc")]
 //! let client = pb::test_client::TestClient::with_origin(stack, uri);
 //!
+//! # #[cfg(feature = "grpc")]
 //! println!("{:?}", client.greet(tonic::Request::new(())).await);
 //! # });
 //! ```

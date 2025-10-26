@@ -43,7 +43,6 @@ use std::future::Future;
 use std::pin::pin;
 use std::time::Duration;
 use thiserror::Error;
-use tonic::body::BoxBody;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
@@ -120,7 +119,7 @@ async fn single_hc<S>(
     service: &str,
 ) -> Result<(), GRPCHealthCheckError>
 where
-    S: tonic::client::GrpcService<BoxBody>,
+    S: tonic::client::GrpcService<tonic::body::Body>,
     S::Error: std::error::Error + Sync,
     S::ResponseBody: Body<Data = hyper::body::Bytes> + Send + 'static,
     <S::ResponseBody as Body>::Error: std::error::Error + Send + Sync,
@@ -157,12 +156,12 @@ impl GRPCHealthChecker {
     }
 }
 
-impl crate::HealthChecker<BoxBody> for GRPCHealthChecker {
+impl crate::HealthChecker<tonic::body::Body> for GRPCHealthChecker {
     type Error = GRPCHealthCheckError;
 
     fn watch<S, RespBody>(&self, svc: S) -> impl Stream<Item = Result<(), Self::Error>>
     where
-        S: Service<http::Request<BoxBody>, Response = http::Response<RespBody>> + Send,
+        S: Service<http::Request<tonic::body::Body>, Response = http::Response<RespBody>> + Send,
         S::Error: std::error::Error + Send + Sync + 'static,
         S::Future: Send,
         RespBody: Body<Data = hyper::body::Bytes> + Send + 'static,
@@ -183,20 +182,22 @@ impl crate::HealthChecker<BoxBody> for GRPCHealthChecker {
 }
 
 /// The type of the channel returned by [`grpc_channel`]. This implements
-/// [`tower_service::Service`] with [`BoxBody`] as the HTTP request body
-/// as required for wrapping a [`tonic`] gRPC client arount it.
+/// [`tower_service::Service`] with [`tonic::body::Body`] as the HTTP
+/// request body as required for wrapping a [`tonic`] gRPC client around it.
 #[cfg(feature = "metrics")]
 pub type GRPCChannel<A, C, HC = GRPCHealthChecker> = crate::channel::Channel<
-    crate::grpc_metrics::MetricsChannel<crate::channel::PoolService<A, BoxBody, C, HC>>,
-    BoxBody,
+    crate::grpc_metrics::MetricsChannel<crate::channel::PoolService<A, tonic::body::Body, C, HC>>,
+    tonic::body::Body,
 >;
 
 /// The type of the channel returned by [`grpc_channel`]. This implements
-/// [`tower_service::Service`] with [`BoxBody`] as the HTTP request body
-/// as required for wrapping a [`tonic`] gRPC client arount it.
+/// [`tower_service::Service`] with [`tonic::body::Body`] as the HTTP
+/// request body as required for wrapping a [`tonic`] gRPC client around it.
 #[cfg(not(feature = "metrics"))]
-pub type GRPCChannel<A, C, HC = GRPCHealthChecker> =
-    crate::channel::Channel<crate::channel::PoolService<A, BoxBody, C, HC>, BoxBody>;
+pub type GRPCChannel<A, C, HC = GRPCHealthChecker> = crate::channel::Channel<
+    crate::channel::PoolService<A, tonic::body::Body, C, HC>,
+    tonic::body::Body,
+>;
 
 /// Create a new always-ready load-balanced gRPC client channel.
 ///
@@ -377,7 +378,7 @@ mod tests {
             let (s1, s2) = tokio::io::duplex(1000);
             let stream =
                 futures::stream::once(std::future::ready(Ok::<_, std::convert::Infallible>(s2)));
-            let (mut r, service) = tonic_health::server::health_reporter();
+            let (r, service) = tonic_health::server::health_reporter();
             tokio::task::spawn(
                 tonic::transport::Server::builder()
                     .add_service(service)

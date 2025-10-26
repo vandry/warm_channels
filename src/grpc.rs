@@ -187,7 +187,7 @@ impl crate::HealthChecker<BoxBody> for GRPCHealthChecker {
 /// as required for wrapping a [`tonic`] gRPC client arount it.
 #[cfg(feature = "metrics")]
 pub type GRPCChannel<A, C, HC = GRPCHealthChecker> = crate::channel::Channel<
-    tonic_prometheus_layer::MetricsChannel<crate::channel::PoolService<A, BoxBody, C, HC>>,
+    crate::grpc_metrics::MetricsChannel<crate::channel::PoolService<A, BoxBody, C, HC>>,
     BoxBody,
 >;
 
@@ -231,7 +231,7 @@ where
         healthy_callback,
     );
     #[cfg(feature = "metrics")]
-    let stack = tonic_prometheus_layer::MetricsChannel::new(stack);
+    let stack = crate::grpc_metrics::MetricsChannel::new(stack);
     crate::channel::Channel::new(stack, worker)
 }
 
@@ -394,12 +394,6 @@ mod tests {
         use futures::pin_mut;
         use prometheus::Encoder;
 
-        let _ = tonic_prometheus_layer::metrics::try_init_settings(
-            tonic_prometheus_layer::metrics::GlobalSettings {
-                registry: prometheus::default_registry().clone(), // Arc
-                ..Default::default()
-            },
-        );
         let rs = futures::stream::once(futures::future::ready(Ok::<_, std::convert::Infallible>(
             vec![()],
         )));

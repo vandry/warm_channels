@@ -293,6 +293,8 @@ mod diag;
 mod eitherio;
 #[cfg(feature = "grpc")]
 pub mod grpc;
+#[cfg(all(feature = "grpc", feature = "metrics"))]
+mod grpc_metrics;
 pub mod http;
 #[cfg(feature = "metrics")]
 mod metrics;

@@ -35,7 +35,6 @@ tokio = { version = "1.40", features = ["macros", "net"] }
 tokio-rustls = { version = "0.26", optional = true }
 tonic = { version = "0.12", optional = true }
 tonic-health = { version = "0.12", optional = true }
-tonic_prometheus_layer = { version = "0.1", optional = true }
 tower = { version = "0.5", features = ["balance", "buffer", "discover"] }
 tower-service = "0.3"
 hickory-resolver = "0.25"
@@ -45,7 +44,7 @@ want = "0.3"
 [features]
 diag = ["axum/original-uri", "dep:atomicbox", "dep:axum", "dep:boxcar", "dep:fixed_deque", "dep:html-escape", "dep:itertools", "dep:rand", "dep:try-lock"]
 default = ["grpc", "tls", "metrics", "unix"]
-grpc = ["dep:tonic", "dep:tonic-health", "dep:tonic_prometheus_layer"]
+grpc = ["dep:tonic", "dep:tonic-health"]
 tls = ["dep:tokio-rustls"]
 metrics = ["dep:lazy_static", "dep:prometheus"]
 unix = []

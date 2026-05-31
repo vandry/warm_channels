@@ -125,6 +125,19 @@ enum ChannelDiagServiceAction {
     NotFound,
 }
 
+/// Original URI of the diagnostic HTTP request
+///
+/// Needed for correctly resolving relative HTML links when the diagnostic
+/// service endpoint is not mounted at the root path. Means the same as and
+/// should be used in the same way as [`axum::extract::OriginalUri`] but
+/// easier to ensure there are no problems with invisible metadate due to
+/// [multiple_crate_versions] if we use our own type.
+///
+/// [`axum::extract::OriginalUri`]: https://docs.rs/axum/latest/axum/extract/struct.OriginalUri.html
+/// [multiple_crate_versions]: https://rust-lang.github.io/rust-clippy/rust-1.95.0/index.html#multiple_crate_versions
+#[derive(Clone, Debug)]
+pub struct OriginalUri(pub http::Uri);
+
 impl<'a, B> Service<http::Request<B>> for ChannelDiagService<'a> {
     type Response = http::Response<String>;
     type Error = std::convert::Infallible;
@@ -137,10 +150,10 @@ impl<'a, B> Service<http::Request<B>> for ChannelDiagService<'a> {
     fn call(&mut self, request: http::Request<B>) -> Self::Future {
         let path = request.uri().path();
         let action = if path == "/" {
-            let original_uri = request.extensions().get::<axum::extract::OriginalUri>();
+            let original_uri = request.extensions().get::<OriginalUri>();
             ChannelDiagServiceAction::Index(match original_uri {
                 Some(uri) => {
-                    let path = uri.path();
+                    let path = uri.0.path();
                     format!(
                         r#"<base href="{}{}">"#,
                         path,

@@ -322,4 +322,4 @@ pub use pool::PoolConfig;
 pub use resolver::resolve_uri;
 
 #[cfg(feature = "diag")]
-pub use diag::ChannelDiagService;
+pub use diag::{ChannelDiagService, OriginalUri};

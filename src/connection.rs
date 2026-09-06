@@ -13,8 +13,9 @@ use std::task::{Context, Poll, ready};
 use thiserror::Error;
 use tower_service::Service;
 
-use crate::pool::{ConnectionReport, PoolCommon};
+use crate::pool::PoolCommon;
 use crate::report::Reporter;
+use crate::shared::SubchannelShared;
 use crate::{Connector, LoggedEvent};
 
 struct SendRequestService<B>(SendRequest<B>);
@@ -140,11 +141,11 @@ where
     }
 }
 
-fn monitor_connection<A, C, HC, ReqBody, F>(
+fn monitor_connection<A, C, HC, ReqBody>(
     address: A,
     shared: Arc<HTTP2ConnectionShared<C, HC>>,
     health: Arc<HTTP2ConnectionHealth<HC::Error>>,
-    reporter_fut: F,
+    reporter: Reporter<SubchannelShared>,
 ) -> ConnectingFuture<ReqBody, C::Error, HC::Error>
 where
     A: Send + 'static,
@@ -153,7 +154,6 @@ where
     C::Error: Send + 'static,
     HC: crate::HealthChecker<ReqBody> + Send + Sync + 'static,
     HC::Error: std::error::Error + Clone + Send,
-    F: Future<Output = Reporter<ConnectionReport>> + Send + 'static,
     ReqBody: Body + Send + Unpin + 'static,
     ReqBody::Data: Send,
     ReqBody::Error: std::error::Error + Send + Sync + 'static,
@@ -161,11 +161,6 @@ where
     let (mut giver, taker) = want::new();
     let (sender_tx, sender_rx) = tokio::sync::oneshot::channel();
     tokio::task::spawn(async move {
-        // Do this as soon as possible because anything that causes us to
-        // return (or panic) before this is successful means reporter won't
-        // be dropped and this connection will leak.
-        let mut reporter = reporter_fut.await;
-
         let stop_signal = pin!(giver.want().fuse());
         let init = pin!(initial_connect::<_, _, ReqBody, HC::Error>(
             &shared.connector,
@@ -181,16 +176,16 @@ where
         let (sender, conn) = match init_result {
             Ok(v) => v,
             Err(e) => {
-                reporter
-                    .send(ConnectionReport::ConnectionError(LoggedEvent::new(
-                        e.to_string(),
-                    )))
-                    .await;
+                reporter.shared().error.store(
+                    Some(Box::new(LoggedEvent::new(e.to_string()))),
+                    Ordering::AcqRel,
+                );
+                reporter.request_attention();
                 let _ = sender_tx.send(Err(e));
                 return;
             }
         };
-        reporter.send(ConnectionReport::Connected).await;
+        reporter.shared().flags.set_connected();
         let mut begin_usage = Some((sender.clone(), sender_tx));
         let mut healthy = None;
         let mut hc_stream = pin!(
@@ -220,12 +215,15 @@ where
                             if !healthy.unwrap_or(false) {
                                 healthy = Some(true);
                                 health.set_healthy();
-                                reporter.send(ConnectionReport::Healthy).await;
+                                reporter.shared().flags.set_healthy();
+                                reporter.request_attention();
                             }
                         }
                         Some(Err(e)) => {
+                            reporter.shared().error.store(Some(Box::new(LoggedEvent::new(e.to_string()))), Ordering::AcqRel);
                             if healthy.unwrap_or(true) {
-                                reporter.send(ConnectionReport::Unhealthy(LoggedEvent::new(e.to_string()))).await;
+                                reporter.shared().flags.set_unhealthy();
+                                reporter.request_attention();
                                 healthy = Some(false);
                                 health.set_unhealthy(e);
                             }
@@ -280,23 +278,20 @@ where
     ReqBody::Data: Send,
     ReqBody::Error: std::error::Error + Send + Sync,
 {
-    fn new<F>(
+    fn new(
         shared: Arc<HTTP2ConnectionShared<C, HC>>,
         pool: Arc<PoolCommon>,
-        reporter_fut: F,
+        reporter: Reporter<SubchannelShared>,
         address: A,
-    ) -> Self
-    where
-        F: Future<Output = Reporter<ConnectionReport>> + Send + 'static,
-    {
+    ) -> Self {
         let health = Arc::new(HTTP2ConnectionHealth::new());
         let monitor_health = Arc::clone(&health);
         // Box::pin is necessary so we can poll it from a Service.
-        let fut = Box::pin(monitor_connection::<_, C, HC, ReqBody, _>(
+        let fut = Box::pin(monitor_connection::<_, C, HC, ReqBody>(
             address,
             shared,
             monitor_health,
-            reporter_fut,
+            reporter,
         ));
         Self {
             pool,
@@ -415,19 +410,16 @@ where
     type ReqBody = ReqBody;
     type Connection = LL::Service;
 
-    fn make_connection<F>(
+    fn make_connection(
         &self,
         pool: Arc<PoolCommon>,
-        reporter_fut: F,
+        reporter: Reporter<SubchannelShared>,
         address: A,
-    ) -> Self::Connection
-    where
-        F: Future<Output = Reporter<ConnectionReport>> + Send + 'static,
-    {
+    ) -> Self::Connection {
         self.ll.layer(HTTP2Connection::new(
             Arc::clone(&self.shared),
             pool,
-            reporter_fut,
+            reporter,
             address,
         ))
     }
@@ -437,6 +429,9 @@ where
 mod tests {
     use async_stream::stream;
     use futures::Stream;
+    use std::borrow::Borrow;
+    use std::collections::HashMap;
+    use std::hash::Hash;
     use tower::ServiceExt;
     use tower::layer::util::Identity;
 
@@ -504,41 +499,21 @@ mod tests {
         }
     }
 
-    async fn expect_connected<D>(inv: &mut Inventory<D, ConnectionReport>, name: D)
-    where
-        D: PartialEq + std::fmt::Debug,
-    {
-        let dr = match inv.recv().await {
-            InventoryReport::Message(dr, ConnectionReport::Connected) => dr,
-            x => {
-                panic!("got wrong message {:?}", x);
-            }
-        };
-        assert_eq!(*dr, name);
+    #[derive(Debug, Default)]
+    struct SubchannelCached {
+        flags: crate::shared::FetchedSubchannelFlags,
+        attention_count: usize,
+        deleted: Option<Result<(), Box<LoggedEvent<String>>>>,
     }
 
-    async fn expect_health_report<D>(inv: &mut Inventory<D, ConnectionReport>, name: D, want: bool)
-    where
-        D: PartialEq + std::fmt::Debug,
-    {
-        let (dr, got) = match inv.recv().await {
-            InventoryReport::Message(dr, ConnectionReport::Healthy) => (dr, true),
-            InventoryReport::Message(dr, ConnectionReport::Unhealthy(_)) => (dr, false),
-            x => {
-                panic!("got wrong message {:?}", x);
-            }
-        };
-        assert_eq!(*dr, name);
-        assert_eq!(want, got);
-    }
-
-    struct TestSetup {
+    struct TestSetup<D> {
         maker: HTTP2ConnectionMaker<TestServer, TestHealthCheck, Identity, String>,
         server: TestServer,
         probe_again: Arc<tokio::sync::Semaphore>,
+        reports: HashMap<D, SubchannelCached>,
     }
 
-    impl TestSetup {
+    impl<D: Eq + Hash + Clone> TestSetup<D> {
         fn new() -> Self {
             let server = TestServer::new();
             let (hc, probe_again) = TestHealthCheck::new();
@@ -547,13 +522,104 @@ mod tests {
                 maker,
                 server,
                 probe_again,
+                reports: HashMap::new(),
+            }
+        }
+
+        async fn collect_report(&mut self, inv: &mut Inventory<D, SubchannelShared>) {
+            match inv.recv().await {
+                InventoryReport::Dropped(d, shared) => {
+                    self.reports.entry(d).and_modify(|c| {
+                        c.deleted = Some(match shared.error.take(Ordering::AcqRel) {
+                            None => Ok(()),
+                            Some(e) => Err(e),
+                        })
+                    });
+                }
+                InventoryReport::Attention(d, shared) => {
+                    let r = self.reports.entry(d.clone()).or_default();
+                    r.attention_count += 1;
+                    r.flags = shared.flags.get();
+                }
+            }
+        }
+
+        fn get_report<Q>(&self, d: &Q) -> Option<&SubchannelCached>
+        where
+            D: Borrow<Q>,
+            Q: Hash + Eq + ?Sized,
+        {
+            self.reports.get(d)
+        }
+
+        async fn expect_connected<Q>(&mut self, inv: &mut Inventory<D, SubchannelShared>, name: &Q)
+        where
+            D: Borrow<Q>,
+            Q: Hash + Eq + ?Sized,
+        {
+            while !self
+                .get_report(name)
+                .map(|report| report.flags.connected())
+                .unwrap_or_default()
+            {
+                self.collect_report(inv).await;
+            }
+        }
+
+        async fn expect_health_report<Q>(
+            &mut self,
+            inv: &mut Inventory<D, SubchannelShared>,
+            name: &Q,
+            want: bool,
+        ) where
+            D: Borrow<Q>,
+            Q: Hash + Eq + ?Sized,
+        {
+            while self.get_report(name).map(|report| report.flags.healthy()) != Some(Some(want)) {
+                self.collect_report(inv).await;
+            }
+        }
+
+        async fn expect_no_subchannel<Q>(
+            &mut self,
+            inv: &mut Inventory<D, SubchannelShared>,
+            name: &Q,
+            want_error: bool,
+        ) where
+            D: Borrow<Q>,
+            Q: Hash + Eq + ?Sized,
+        {
+            loop {
+                match self.get_report(name) {
+                    None => {
+                        if !want_error {
+                            return;
+                        }
+                    }
+                    Some(s) => match s.deleted {
+                        None => (),
+                        Some(Ok(())) => {
+                            if want_error {
+                                panic!("Expected an errored connection, got a successful one");
+                            }
+                            return;
+                        }
+                        Some(Err(ref e)) => {
+                            if !want_error {
+                                panic!("Expected a successful connection, got {e:?}");
+                            }
+                            return;
+                        }
+                    },
+                }
+                self.collect_report(inv).await;
             }
         }
     }
 
     #[tokio::test]
     async fn simple_success() {
-        let t = TestSetup::new();
+        let mut t = TestSetup::new();
         let pif = PoolCommonTestInterface::new();
         let mut inv = Inventory::new(1);
 
@@ -564,8 +630,8 @@ mod tests {
         let mut c =
             t.maker
                 .make_connection(pif.pool(), inv.allocate("foo"), TestServerAddress::Working);
-        expect_connected(&mut inv, "foo").await;
-        expect_health_report(&mut inv, "foo", true).await;
+        t.expect_connected(&mut inv, "foo").await;
+        t.expect_health_report(&mut inv, "foo", true).await;
         let resp = c
             .ready()
             .await
@@ -575,12 +641,12 @@ mod tests {
             .expect("successful request");
         assert_eq!(resp.status(), 200);
         std::mem::drop(c);
-        assert_eq!(inv.recv().await, InventoryReport::Dropped("foo"));
+        t.expect_no_subchannel(&mut inv, "foo", false).await;
     }
 
     #[tokio::test]
     async fn simple_unhealthy() {
-        let t = TestSetup::new();
+        let mut t = TestSetup::new();
         t.server.set_healthy(false);
         let pif = PoolCommonTestInterface::new();
         let mut inv = Inventory::new(1);
@@ -588,22 +654,22 @@ mod tests {
         let mut c =
             t.maker
                 .make_connection(pif.pool(), inv.allocate("foo"), TestServerAddress::Working);
-        expect_connected(&mut inv, "foo").await;
-        expect_health_report(&mut inv, "foo", false).await;
+        t.expect_connected(&mut inv, "foo").await;
+        t.expect_health_report(&mut inv, "foo", false).await;
         assert_matches!(c.ready().await, Err(HTTP2ConnectionError::Unhealthy(_)));
         // Connections don't drop themselves for being unhealthy.
         t.server.set_healthy(true);
         t.probe_again.add_permits(1);
-        expect_health_report(&mut inv, "foo", true).await;
+        t.expect_health_report(&mut inv, "foo", true).await;
         // But the tower Service contract says you should drop connections
         // that poll_ready with Err.
         std::mem::drop(c);
-        assert_eq!(inv.recv().await, InventoryReport::Dropped("foo"));
+        t.expect_no_subchannel(&mut inv, "foo", true).await;
     }
 
     #[tokio::test]
     async fn failure_to_connect() {
-        let t = TestSetup::new();
+        let mut t = TestSetup::new();
         t.server.set_healthy(false);
         let pif = PoolCommonTestInterface::new();
         let mut inv = Inventory::new(1);
@@ -620,16 +686,12 @@ mod tests {
         // The connecton gets dropped even if nobody polls it ready
         // because this status is unrecoverable and the pool will want
         // to replace it with a new connection as soon as possible.
-        assert_matches!(
-            inv.recv().await,
-            InventoryReport::Message(_, ConnectionReport::ConnectionError(_))
-        );
-        assert_eq!(inv.recv().await, InventoryReport::Dropped("foo"));
+        t.expect_no_subchannel(&mut inv, "foo", false).await;
     }
 
     #[tokio::test]
     async fn dropped_while_connecting() {
-        let t = TestSetup::new();
+        let mut t = TestSetup::new();
         let pif = PoolCommonTestInterface::new();
         let mut inv = Inventory::new(1);
 
@@ -638,37 +700,53 @@ mod tests {
             inv.allocate("foo"),
             TestServerAddress::HangsOnConnect,
         );
-        assert_eq!(inv.recv().await, InventoryReport::Dropped("foo"));
+        t.expect_no_subchannel(&mut inv, "foo", false).await;
     }
 
     #[tokio::test]
     async fn health_changes() {
-        let t = TestSetup::new();
+        let mut t = TestSetup::new();
         let pif = PoolCommonTestInterface::new();
         let mut inv = Inventory::new(1);
 
         let c =
             t.maker
                 .make_connection(pif.pool(), inv.allocate("foo"), TestServerAddress::Working);
-        expect_connected(&mut inv, "foo").await;
-        expect_health_report(&mut inv, "foo", true).await;
+        t.expect_connected(&mut inv, "foo").await;
+        t.expect_health_report(&mut inv, "foo", true).await;
         t.server.set_healthy(false);
         t.probe_again.add_permits(1);
-        expect_health_report(&mut inv, "foo", false).await;
+        t.expect_health_report(&mut inv, "foo", false).await;
+        let foocount = t
+            .get_report("foo")
+            .expect("have subchannel foo")
+            .attention_count;
         t.probe_again.add_permits(1);
         // No notification if the health is still false.
         t.server.set_healthy(true);
         t.probe_again.add_permits(1);
-        expect_health_report(&mut inv, "foo", true).await;
+        t.expect_health_report(&mut inv, "foo", true).await;
+        assert_eq!(
+            t.get_report("foo")
+                .expect("have subchannel foo")
+                .attention_count,
+            foocount + 1
+        );
         t.probe_again.add_permits(1);
         // No notification if the health is still false.
         std::mem::drop(c);
-        assert_eq!(inv.recv().await, InventoryReport::Dropped("foo"));
+        t.expect_no_subchannel(&mut inv, "foo", true).await;
+        assert_eq!(
+            t.get_report("foo")
+                .expect("have subchannel foo")
+                .attention_count,
+            foocount + 1
+        );
     }
 
     #[tokio::test]
     async fn critically_unhealthy() {
-        let t = TestSetup::new();
+        let mut t = TestSetup::new();
         t.server.set_healthy(false);
         let pif = PoolCommonTestInterface::new();
         let mut inv = Inventory::new(1);
@@ -676,8 +754,8 @@ mod tests {
         let mut c =
             t.maker
                 .make_connection(pif.pool(), inv.allocate("foo"), TestServerAddress::Working);
-        expect_connected(&mut inv, "foo").await;
-        expect_health_report(&mut inv, "foo", false).await;
+        t.expect_connected(&mut inv, "foo").await;
+        t.expect_health_report(&mut inv, "foo", false).await;
         pif.set_critically_unhealthy(true);
         // Unhealthy but should accept requests anyway.
         assert!(c.ready().await.is_ok());

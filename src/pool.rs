@@ -13,6 +13,7 @@ use tower::discover::Change;
 
 use crate::addresses::{AddressSlot, ResolvedAddressChoice, ResolvedAddressCollection};
 use crate::report::{Inventory, InventoryReport};
+use crate::shared::SubchannelShared;
 use crate::{LoggedEvent, PoolMemberMaker};
 
 /// Configuration parameters for load-balanced channels.
@@ -136,21 +137,12 @@ pub struct PoolMemberKey(u64);
 
 pub(crate) type DiscoverItem<LLS> = Result<Change<PoolMemberKey, LLS>, std::convert::Infallible>;
 
-#[derive(Debug, PartialEq)]
-pub(crate) enum ConnectionReport {
-    Connected,
-    Unhealthy(LoggedEvent<String>),
-    Healthy,
-    ConnectionError(LoggedEvent<String>),
-}
-
 #[derive(Debug)]
 struct Subchannel {
     key: Option<PoolMemberKey>,
     address_index: AddressSlot,
     healthy: bool,
     ever_healthy: bool,
-    connected: bool,
 }
 
 impl Subchannel {
@@ -160,7 +152,6 @@ impl Subchannel {
             address_index,
             healthy: false,
             ever_healthy: false,
-            connected: false,
         }
     }
 }
@@ -327,10 +318,15 @@ where
     fn accept_connection_report<DR>(
         &mut self,
         s: &mut Subchannel,
-        report: ConnectionReport,
+        shared: &SubchannelShared,
     ) -> PoolRegulatorAction<DR> {
-        match report {
-            ConnectionReport::Healthy => {
+        if let Some(e) = shared.error.take(Ordering::AcqRel) {
+            self.addresses.log_error(s.address_index, *e);
+        }
+        let flags = shared.flags.get();
+        match flags.healthy() {
+            None => (),
+            Some(true) => {
                 if !s.ever_healthy {
                     s.ever_healthy = true;
                     self.addresses.mark_success(s.address_index);
@@ -342,23 +338,16 @@ where
                     }
                 }
             }
-            ConnectionReport::Unhealthy(e) => {
+            Some(false) => {
                 if s.healthy {
                     s.healthy = false;
                     self.dec_healthy();
                 }
-                self.addresses.log_error(s.address_index, e);
                 if !self.critically_unhealthy {
                     if let Some(key) = s.key.take() {
                         return PoolRegulatorAction::PleaseDrop(key);
                     }
                 }
-            }
-            ConnectionReport::ConnectionError(e) => {
-                self.addresses.log_error(s.address_index, e);
-            }
-            ConnectionReport::Connected => {
-                s.connected = true;
             }
         }
         PoolRegulatorAction::NoAction
@@ -389,11 +378,11 @@ where
 
     fn accept_message<DR>(
         &mut self,
-        m: InventoryReport<'_, Subchannel, ConnectionReport>,
+        m: InventoryReport<'_, Subchannel, SubchannelShared>,
     ) -> PoolRegulatorAction<DR> {
         match m {
-            InventoryReport::Message(s, r) => self.accept_connection_report(s, r),
-            InventoryReport::Dropped(s) => self.connection_dropped(s),
+            InventoryReport::Attention(s, r) => self.accept_connection_report(s, r),
+            InventoryReport::Dropped(s, r) => self.connection_dropped(s, r),
         }
     }
 
@@ -444,7 +433,14 @@ where
         }
     }
 
-    fn connection_dropped<DR>(&mut self, s: Subchannel) -> PoolRegulatorAction<DR> {
+    fn connection_dropped<DR>(
+        &mut self,
+        s: Subchannel,
+        shared: &SubchannelShared,
+    ) -> PoolRegulatorAction<DR> {
+        if let Some(e) = shared.error.take(Ordering::AcqRel) {
+            self.addresses.log_error(s.address_index, *e);
+        }
         self.n_subchannels_have -= 1;
         if s.healthy {
             self.dec_healthy();
@@ -491,11 +487,11 @@ mod no_diag {
 }
 
 #[cfg(feature = "diag")]
-fn make_diag_report<A, B, HR, L, R>(
+fn make_diag_report<A, B, HR, L>(
     id: usize,
     want_full: bool,
     regulator: &PoolRegulator<A, B, HR, L>,
-    subchannels: &Inventory<Subchannel, R>,
+    subchannels: &Inventory<Subchannel, SubchannelShared>,
 ) -> Box<crate::diag::Report>
 where
     A: std::hash::Hash + std::fmt::Debug + Eq + Clone,
@@ -510,10 +506,11 @@ where
                 resolved_addresses: regulator.addresses.diag_list().collect(),
                 subchannels: subchannels
                     .iter()
-                    .map(|s| {
+                    .map(|(s, shared)| {
+                        let flags = shared.flags.get();
                         format!(
                             "{} to {:?}, {}",
-                            if s.connected {
+                            if flags.connected() {
                                 "Connected"
                             } else {
                                 "Connecting"
@@ -523,7 +520,7 @@ where
                                 "healthy"
                             } else if s.ever_healthy {
                                 "unhealthy"
-                            } else if s.connected {
+                            } else if flags.connected() {
                                 "never healthy"
                             } else {
                                 "connection in progress"
@@ -629,7 +626,6 @@ where
 mod tests {
     use futures::poll;
     use futures::stream::BoxStream;
-    use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll};
     use tower_service::Service;
@@ -648,7 +644,7 @@ mod tests {
     };
 
     struct TestConnection {
-        reporter_fut: Pin<Box<dyn Future<Output = Reporter<ConnectionReport>> + Send>>,
+        reporter: Reporter<SubchannelShared>,
         common: Option<Arc<PoolCommon>>,
     }
 
@@ -678,17 +674,14 @@ mod tests {
         type ReqBody = ();
         type Connection = TestConnection;
 
-        fn make_connection<F>(
+        fn make_connection(
             &self,
             common: Arc<PoolCommon>,
-            reporter_fut: F,
+            reporter: Reporter<SubchannelShared>,
             _: usize,
-        ) -> Self::Connection
-        where
-            F: Future<Output = Reporter<ConnectionReport>> + Send + 'static,
-        {
+        ) -> Self::Connection {
             TestConnection {
-                reporter_fut: Box::pin(reporter_fut),
+                reporter,
                 common: Some(common),
             }
         }
@@ -731,11 +724,11 @@ mod tests {
             }
         }
 
-        async fn expect_connection(&mut self) -> (PoolMemberKey, Reporter<ConnectionReport>) {
+        async fn expect_connection(&mut self) -> (PoolMemberKey, Reporter<SubchannelShared>) {
             match poll!(self.discover.next()) {
                 Poll::Ready(Some(Ok(Change::Insert(key, mut connection)))) => {
                     self.common = connection.common.take();
-                    (key, connection.reporter_fut.await)
+                    (key, connection.reporter)
                 }
                 x => panic!("unexpected message {:?}", x),
             }
@@ -744,6 +737,13 @@ mod tests {
         async fn expect_drop(&mut self, want: PoolMemberKey) {
             match poll!(self.discover.next()) {
                 Poll::Ready(Some(Ok(Change::Remove(got)))) => assert_eq!(got, want),
+                x => panic!("unexpected message {:?}", x),
+            }
+        }
+
+        async fn expect_pending(&mut self) {
+            match poll!(self.discover.next()) {
+                Poll::Pending => (),
                 x => panic!("unexpected message {:?}", x),
             }
         }
@@ -850,7 +850,7 @@ mod tests {
     async fn add_one_at_a_time() {
         let mut t = TestPool::new(n_addresses(1));
 
-        let (_k1, mut c1) = t.expect_connection().await;
+        let (_k1, c1) = t.expect_connection().await;
         assert_matches!(
             *t.common.as_ref().unwrap().last_error.lock().unwrap(),
             Some(LoggedEvent {
@@ -873,9 +873,11 @@ mod tests {
         // Won't make another connection to the same address until the outcome
         // of the first is known.
         assert!(poll!(t.discover.next()).is_pending());
-        c1.send(ConnectionReport::Healthy).await;
+        c1.shared().flags.set_connected();
+        c1.shared().flags.set_healthy();
+        c1.request_attention();
 
-        let (_k2, mut c2) = t.expect_connection().await;
+        let (_k2, c2) = t.expect_connection().await;
         assert!(t.healthy().is_none()); // Need 2
         assert_matches!(
             *t.common.as_ref().unwrap().last_error.lock().unwrap(),
@@ -894,9 +896,11 @@ mod tests {
             false
         );
         assert!(poll!(t.discover.next()).is_pending());
-        c2.send(ConnectionReport::Healthy).await;
+        c2.shared().flags.set_connected();
+        c2.shared().flags.set_healthy();
+        c2.request_attention();
 
-        let (_k3, mut c3) = t.expect_connection().await;
+        let (_k3, c3) = t.expect_connection().await;
 
         assert_eq!(
             t.healthy()
@@ -912,7 +916,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        c3.send(ConnectionReport::Healthy).await;
+        c3.shared().flags.set_connected();
+        c3.shared().flags.set_healthy();
+        c3.request_attention();
         // No more, we already have the wanted number.
         assert!(poll!(t.discover.next()).is_pending());
 
@@ -933,13 +939,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn one_unhealthy() {
         let mut t = TestPool::new(n_addresses(3));
-        let (_k1, mut c1) = t.expect_connection().await;
-        let (_k2, mut c2) = t.expect_connection().await;
-        let (k3, mut c3) = t.expect_connection().await;
-        c1.send(ConnectionReport::Healthy).await;
-        c2.send(ConnectionReport::Healthy).await;
-        c3.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
+        let (_k1, c1) = t.expect_connection().await;
+        let (_k2, c2) = t.expect_connection().await;
+        let (k3, c3) = t.expect_connection().await;
+        c1.shared().flags.set_connected();
+        c2.shared().flags.set_connected();
+        c3.shared().flags.set_connected();
+        c1.shared().flags.set_healthy();
+        c2.shared().flags.set_healthy();
+        c3.shared().flags.set_unhealthy();
+        c1.request_attention();
+        c2.request_attention();
+        c3.request_attention();
         t.expect_drop(k3).await;
         std::mem::drop(c3);
         let (_k4, _c4) = t.expect_connection().await;
@@ -956,20 +967,24 @@ mod tests {
                 .load(Ordering::Acquire),
             false
         );
-        assert!(poll!(t.discover.next()).is_pending());
+        t.expect_pending().await;
     }
 
     #[tokio::test(start_paused = true)]
     async fn two_unhealthy() {
         let mut t = TestPool::new(n_addresses(4));
-        let (_k1, mut c1) = t.expect_connection().await;
-        let (k2, mut c2) = t.expect_connection().await;
-        let (k3, mut c3) = t.expect_connection().await;
-        c1.send(ConnectionReport::Healthy).await;
-        c2.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
-        c3.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
+        let (_k1, c1) = t.expect_connection().await;
+        let (k2, c2) = t.expect_connection().await;
+        let (k3, c3) = t.expect_connection().await;
+        c1.shared().flags.set_connected();
+        c2.shared().flags.set_connected();
+        c3.shared().flags.set_connected();
+        c1.shared().flags.set_healthy();
+        c2.shared().flags.set_unhealthy();
+        c3.shared().flags.set_unhealthy();
+        c1.request_attention();
+        c2.request_attention();
+        c3.request_attention();
         t.expect_drop(k2).await;
         std::mem::drop(c2);
         t.expect_drop(k3).await;
@@ -991,15 +1006,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn all_initially_unhealthy() {
         let mut t = TestPool::new(n_addresses(6));
-        let (k1, mut c1) = t.expect_connection().await;
-        let (k2, mut c2) = t.expect_connection().await;
-        let (k3, mut c3) = t.expect_connection().await;
-        c1.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
-        c2.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
-        c3.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
+        let (k1, c1) = t.expect_connection().await;
+        let (k2, c2) = t.expect_connection().await;
+        let (k3, c3) = t.expect_connection().await;
+        c1.shared().flags.set_connected();
+        c2.shared().flags.set_connected();
+        c3.shared().flags.set_connected();
+        c1.shared().flags.set_unhealthy();
+        c2.shared().flags.set_unhealthy();
+        c3.shared().flags.set_unhealthy();
+        c1.request_attention();
+        c2.request_attention();
+        c3.request_attention();
         // Critical unhealthy mode does not engage unless we have been
         // once above the threshold.
         t.expect_drop(k1).await;
@@ -1026,18 +1044,26 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn all_unhealthy_later() {
         let mut t = TestPool::new(n_addresses(6));
-        let (k1, mut c1) = t.expect_connection().await;
-        let (k2, mut c2) = t.expect_connection().await;
-        let (k3, mut c3) = t.expect_connection().await;
-        c1.send(ConnectionReport::Healthy).await;
-        c2.send(ConnectionReport::Healthy).await;
-        c3.send(ConnectionReport::Healthy).await;
+        let (k1, c1) = t.expect_connection().await;
+        let (k2, c2) = t.expect_connection().await;
+        let (k3, c3) = t.expect_connection().await;
+        c1.shared().flags.set_connected();
+        c2.shared().flags.set_connected();
+        c3.shared().flags.set_connected();
+        c1.shared().flags.set_healthy();
+        c2.shared().flags.set_healthy();
+        c3.shared().flags.set_healthy();
+        c1.request_attention();
+        c2.request_attention();
+        c3.request_attention();
         // Nothing more to do for now.
+        t.expect_pending().await;
 
         // First becomes unhealthy. Drop and replace.
-        c1.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
+        c1.shared().flags.set_unhealthy();
+        c1.request_attention();
         t.expect_drop(k1).await;
+        t.expect_pending().await;
         assert_eq!(t.healthy().expect("still healthy"), true);
         assert_eq!(
             t.common
@@ -1051,8 +1077,8 @@ mod tests {
         let (_k4, _c4) = t.expect_connection().await;
 
         // Second becomes unhealthy. Drop and replace.
-        c2.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
+        c2.shared().flags.set_unhealthy();
+        c2.request_attention();
         t.expect_drop(k2).await;
         assert_eq!(t.healthy().expect("not healthy anymore"), false);
         assert_eq!(
@@ -1064,11 +1090,11 @@ mod tests {
             false
         );
         std::mem::drop(c2);
-        let (_k5, mut c5) = t.expect_connection().await;
+        let (_k5, c5) = t.expect_connection().await;
 
         // Third becomes unhealthy. Maintain.
-        c3.send(ConnectionReport::Unhealthy(LoggedEvent::new("no".into())))
-            .await;
+        c3.shared().flags.set_unhealthy();
+        c3.request_attention();
         assert!(poll!(t.discover.next()).is_pending());
         assert_eq!(t.healthy().expect("not healthy anymore"), false);
         assert_eq!(
@@ -1081,7 +1107,9 @@ mod tests {
         );
 
         // One of the new connections gets healthy.
-        c5.send(ConnectionReport::Healthy).await;
+        c5.shared().flags.set_connected();
+        c5.shared().flags.set_healthy();
+        c5.request_attention();
         // Now we are out of critically unhealthy mode and can drop the unhealthy.
         t.expect_drop(k3).await;
     }
@@ -1089,11 +1117,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn drop_healthy() {
         let mut t = TestPool::new(n_addresses(3));
-        let (_k1, mut c1) = t.expect_connection().await;
-        let (_k2, mut c2) = t.expect_connection().await;
+        let (_k1, c1) = t.expect_connection().await;
+        let (_k2, c2) = t.expect_connection().await;
         let (_k3, _c3) = t.expect_connection().await;
-        c1.send(ConnectionReport::Healthy).await;
-        c2.send(ConnectionReport::Healthy).await;
+        c1.shared().flags.set_connected();
+        c2.shared().flags.set_connected();
+        c1.shared().flags.set_healthy();
+        c2.shared().flags.set_healthy();
+        c1.request_attention();
+        c2.request_attention();
         assert_matches!(poll!(t.discover.next()), Poll::Pending);
         assert_eq!(t.healthy().expect("healthy"), true);
 

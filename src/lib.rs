@@ -226,14 +226,12 @@ trait PoolMemberMaker<A> {
     type ReqBody;
     type Connection: Service<::http::Request<Self::ReqBody>>;
 
-    fn make_connection<F>(
+    fn make_connection(
         &self,
         pool: Arc<pool::PoolCommon>,
-        reporter_fut: F,
+        reporter: report::Reporter<shared::SubchannelShared>,
         address: A,
-    ) -> Self::Connection
-    where
-        F: Future<Output = report::Reporter<pool::ConnectionReport>> + Send + 'static;
+    ) -> Self::Connection;
 }
 
 #[derive(Debug, PartialEq)]
@@ -287,6 +285,25 @@ fn default_backoff() -> backoff::ExponentialBackoff {
         .build()
 }
 
+macro_rules! clearable {
+    (
+        $( #[$attrs:meta] )?
+        $vis:vis struct $name:ident $( < $gen:tt > )? {
+            $( $mvis:vis $mname:ident : $mty:ty , )*
+        }
+    ) => {
+        $( #[$attrs] )?
+        $vis struct $name $( < $gen > )? {
+            $( $mvis $mname : $mty , )*
+        }
+        impl $( < $gen > )? $crate::report::Clear for $name $( < $gen > )? {
+            fn clear(&self) {
+                $( $crate::report::Clear::clear(&self . $mname ); )*
+            }
+        }
+    }
+}
+
 mod addresses;
 mod balance_driver;
 mod channel;
@@ -305,6 +322,7 @@ mod metrics;
 mod pool;
 mod report;
 pub mod resolver;
+mod shared;
 #[cfg(feature = "diag")]
 mod snapshot;
 pub mod stream;

@@ -1,5 +1,6 @@
 use futures::select;
 use futures::{FutureExt, Stream};
+use requests_gauge::CompleteAfterBody;
 use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll};
@@ -50,7 +51,10 @@ pub(crate) type PoolService<A, ReqBody, C, HC> = crate::balance_driver::ShimmedS
     tower::balance::p2c::Balance<
         crate::balance_driver::ShimmedStream<
             crate::pool::DiscoverItem<
-                PendingRequests<crate::connection::HTTP2Connection<A, C, HC, ReqBody>>,
+                PendingRequests<
+                    crate::connection::HTTP2Connection<A, C, HC, ReqBody>,
+                    CompleteAfterBody,
+                >,
             >,
         >,
         http::Request<ReqBody>,
@@ -109,9 +113,8 @@ where
         crate::connection::HTTP2ConnectionMaker::new(
             connector,
             health_checker,
-            tower::ServiceBuilder::new().layer_fn(|s| {
-                PendingRequests::new(s, tower::load::completion::CompleteOnResponse::default())
-            }),
+            tower::ServiceBuilder::new()
+                .layer_fn(|s| PendingRequests::new(s, CompleteAfterBody)),
         ),
         crate::default_backoff(),
         healthy_callback,

@@ -46,6 +46,7 @@ use thiserror::Error;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
+use tower_layer::Layer;
 use tower_service::Service;
 
 use crate::Connector;
@@ -186,7 +187,9 @@ impl crate::HealthChecker<tonic::body::Body> for GRPCHealthChecker {
 /// request body as required for wrapping a [`tonic`] gRPC client around it.
 #[cfg(feature = "metrics")]
 pub type GRPCChannel<A, C, HC = GRPCHealthChecker> = crate::channel::Channel<
-    crate::grpc_metrics::MetricsChannel<crate::channel::PoolService<A, tonic::body::Body, C, HC>>,
+    <crate::grpc_metrics::MetricsLayer as Layer<
+        crate::channel::PoolService<A, tonic::body::Body, C, HC>,
+    >>::Service,
     tonic::body::Body,
 >;
 
@@ -226,7 +229,7 @@ where
     L: AsRef<str> + Send + 'static,
 {
     let health_checker = GRPCHealthChecker::new(uri, config.health_checking);
-    let (stack, worker) = crate::channel::pool_service(
+    let (base, worker) = crate::channel::pool_service(
         config.pool,
         label,
         connector,
@@ -235,8 +238,10 @@ where
         healthy_callback,
     );
     #[cfg(feature = "metrics")]
-    let stack = crate::grpc_metrics::MetricsChannel::new(stack);
-    crate::channel::Channel::new(stack, worker)
+    let metrics_layer = crate::grpc_metrics::MetricsLayer;
+    #[cfg(not(feature = "metrics"))]
+    let metrics_layer = ();
+    crate::channel::Channel::new(metrics_layer.layer(base), worker)
 }
 
 #[cfg(test)]

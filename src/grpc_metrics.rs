@@ -1,11 +1,11 @@
 use http::{Request, Response};
 use lazy_static::lazy_static;
-use pin_project_lite::pin_project;
 use prometheus::{register_counter_vec, register_histogram_vec};
-use std::pin::Pin;
-use std::task::{Context, Poll, ready};
+use requests_gauge::{RequestsGaugeLayer, WithCompletionSubscriber};
+use std::task::{Context, Poll};
 use std::time::Instant;
 use tonic::{Code, GrpcMethod};
+use tower_layer::Layer;
 use tower_service::Service;
 
 const DEFAULT_HISTOGRAM_BUCKETS: [f64; 14] = [
@@ -34,64 +34,62 @@ lazy_static! {
     .unwrap();
 }
 
-pin_project! {
-    pub struct MetricsChannelFuture<F> {
-        service: String,
-        method: String,
-        started_at: Option<Instant>,
-        #[pin] inner: F,
-    }
+pub struct MetricsUpdater {
+    service: String,
+    method: String,
+    started_at: Option<Instant>,
+    response_code: Option<Code>,
 }
 
-impl<F> MetricsChannelFuture<F> {
-    pub fn new(service: String, method: String, inner: F) -> Self {
+impl MetricsUpdater {
+    pub fn new(service: String, method: String) -> Self {
         Self {
-            inner,
             started_at: None,
+            response_code: None,
             service,
             method,
         }
     }
 }
 
-impl<F, O, E> Future for MetricsChannelFuture<F>
-where
-    F: Future<Output = Result<Response<O>, E>>,
-{
-    type Output = F::Output;
+impl<B, E> requests_gauge::RequestsGaugeSubscriber<Result<Response<B>, E>> for MetricsUpdater {
+    fn request_started(&mut self) {
+        self.started_at = Some(Instant::now());
+        COUNTER_STARTED
+            .with_label_values(&[self.service.as_str(), self.method.as_str()])
+            .inc();
+    }
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.project();
-        let started_at = this.started_at.get_or_insert_with(|| {
-            COUNTER_STARTED
-                .with_label_values(&[this.service.as_str(), this.method.as_str()])
-                .inc();
-            Instant::now()
-        });
-        let v = ready!(this.inner.poll(cx));
-        let code = v.as_ref().map_or(Code::Unknown, |resp| {
+    fn request_responded(&mut self, response: &Result<Response<B>, E>) {
+        self.response_code = response.as_ref().ok().map(|resp| {
             resp.headers()
                 .get("grpc-status")
                 .map(|s| Code::from_bytes(s.as_bytes()))
                 .unwrap_or(Code::Ok)
         });
-        let code_str = format!("{:?}", code);
-        let elapsed = Instant::now().duration_since(*started_at).as_secs_f64();
-        COUNTER_HANDLED
-            .with_label_values(&[
-                this.service.as_str(),
-                this.method.as_str(),
-                code_str.as_str(),
-            ])
-            .inc();
-        HISTOGRAM
-            .with_label_values(&[
-                this.service.as_str(),
-                this.method.as_str(),
-                code_str.as_str(),
-            ])
-            .observe(elapsed);
-        Poll::Ready(v)
+    }
+}
+
+impl Drop for MetricsUpdater {
+    fn drop(&mut self) {
+        if let Some(started_at) = self.started_at.take() {
+            let code_str = format!("{:?}", self.response_code.take().unwrap_or(Code::Unknown));
+            let elapsed = Instant::now().duration_since(started_at).as_secs_f64();
+            COUNTER_HANDLED
+                .with_label_values(&[
+                    self.service.as_str(),
+                    self.method.as_str(),
+                    code_str.as_str(),
+                ])
+                .inc();
+            HISTOGRAM
+                .with_label_values(&[
+                    self.service.as_str(),
+                    self.method.as_str(),
+                    code_str.as_str(),
+                ])
+                .observe(elapsed);
+        }
     }
 }
 
@@ -107,12 +105,12 @@ impl<T> MetricsChannel<T> {
 
 impl<I, O, T> Service<Request<I>> for MetricsChannel<T>
 where
-    T: Service<Request<I>, Response = Response<O>>,
+    T: Service<WithCompletionSubscriber<Request<I>, MetricsUpdater>, Response = Response<O>>,
     T::Future: Future<Output = Result<T::Response, T::Error>>,
 {
     type Response = T::Response;
     type Error = T::Error;
-    type Future = MetricsChannelFuture<T::Future>;
+    type Future = T::Future;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -123,6 +121,18 @@ where
             .extensions()
             .get::<GrpcMethod>()
             .map_or(("", ""), |gm| (gm.service(), gm.method()));
-        MetricsChannelFuture::new(service.into(), method.into(), self.inner.call(req))
+        let updater = MetricsUpdater::new(service.into(), method.into());
+        self.inner.call(WithCompletionSubscriber::new(req, updater))
+    }
+}
+
+#[derive(Default)]
+pub struct MetricsLayer;
+
+impl<S> Layer<S> for MetricsLayer {
+    type Service = MetricsChannel<<RequestsGaugeLayer as Layer<S>>::Service>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        MetricsChannel::new(RequestsGaugeLayer::new().layer(inner))
     }
 }

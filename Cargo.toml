@@ -29,12 +29,14 @@ log = "0.4"
 pin-project-lite = "0.2"
 prometheus = { version = "0.14", optional = true }
 rand = { version = "0.8.5", optional = true }
+requests_gauge = { version = "0.1.0", features = ["tower-load"] }
 thiserror = "2.0"
 tokio = { version = "1.40", features = ["macros", "net"] }
 tokio-rustls = { version = "0.26", optional = true }
 tonic = { version = "0.14.2", optional = true }
 tonic-health = { version = "0.14.2", optional = true }
 tower = { version = "0.5", features = ["balance", "buffer", "discover"] }
+tower-layer = "0.3.3"
 tower-service = "0.3"
 hickory-resolver = "0.25"
 try-lock = { version = "0.2.5", optional = true }

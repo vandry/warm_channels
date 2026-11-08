@@ -10,6 +10,7 @@ enum InventoryEntry<D> {
 }
 
 #[repr(transparent)]
+#[derive(Debug)]
 struct EntryPointer(AtomicUsize);
 
 impl Default for EntryPointer {
@@ -65,7 +66,16 @@ impl<T> Clear for atomicbox::AtomicOptionBox<T> {
     }
 }
 
-#[derive(Default)]
+impl<T: Default> Clear for std::sync::Mutex<T> {
+    fn clear(&self) {
+        *self
+            .lock()
+            .or_else(|poison| Ok::<_, std::convert::Infallible>(poison.into_inner()))
+            .unwrap() = Default::default();
+    }
+}
+
+#[derive(Debug, Default)]
 struct InventorySharedEntry<S> {
     attention_next: EntryPointer,
     dropped: std::sync::atomic::AtomicBool,
@@ -162,6 +172,15 @@ pub(crate) struct Inventory<D, S> {
 pub(crate) struct Reporter<S> {
     index: usize,
     shared: Arc<InventoryShared<S>>,
+}
+
+impl<S: std::fmt::Debug> std::fmt::Debug for Reporter<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_struct("Reporter")
+            .field("index", &self.index)
+            .field("entry", &self.shared.entries[self.index])
+            .finish()
+    }
 }
 
 #[derive(Debug, PartialEq)]

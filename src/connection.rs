@@ -8,7 +8,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, ready};
 use thiserror::Error;
 use tower_service::Service;
@@ -42,36 +42,33 @@ where
 enum HealthState<E> {
     Healthy,
     Unhealthy(E),
+    NotYetChecked,
 }
 
 #[derive(Debug)]
-struct HTTP2ConnectionHealth<E> {
-    healthy: AtomicBool,
+struct HTTP2ConnectionHandle<E> {
+    reporter: Reporter<SubchannelShared>,
     error: std::sync::Mutex<Option<E>>,
 }
 
-impl<E: Clone> HTTP2ConnectionHealth<E> {
-    fn new() -> Self {
+impl<E: Clone> HTTP2ConnectionHandle<E> {
+    fn new(reporter: Reporter<SubchannelShared>) -> Self {
         Self {
-            healthy: AtomicBool::default(),
+            reporter,
             error: std::sync::Mutex::new(None),
         }
     }
 
-    fn set_healthy(&self) {
-        self.healthy.store(true, Ordering::Release);
-    }
-
-    fn set_unhealthy(&self, e: E) {
-        *self.error.lock().unwrap() = Some(e);
-        self.healthy.store(false, Ordering::Release);
-    }
-
-    fn get(&self) -> HealthState<E> {
-        match self.healthy.load(Ordering::Acquire) {
-            true => HealthState::Healthy,
-            false => HealthState::Unhealthy(self.error.lock().unwrap().clone().unwrap()),
+    fn get_healthy(&self) -> HealthState<E> {
+        match self.shared().flags.get().healthy() {
+            Some(true) => HealthState::Healthy,
+            Some(false) => HealthState::Unhealthy(self.error.lock().unwrap().clone().unwrap()),
+            None => HealthState::NotYetChecked,
         }
+    }
+
+    fn shared(&self) -> &SubchannelShared {
+        self.reporter.shared()
     }
 }
 
@@ -119,7 +116,7 @@ pin_project! {
     #[derive(Debug)]
     struct ConnectingFuture<ReqBody, CE: std::error::Error, HCE: std::error::Error> {
         alive_sentinel: Option<want::Taker>,
-        #[pin] ready_notify: tokio::sync::oneshot::Receiver<Result<SendRequest<ReqBody>, HTTP2ConnectionError<CE, HCE>>>,
+        #[pin] ready_notify: tokio::sync::oneshot::Receiver<Result<(SendRequest<ReqBody>, Arc<HTTP2ConnectionHandle<HCE>>), HTTP2ConnectionError<CE, HCE>>>,
     }
 }
 
@@ -128,14 +125,18 @@ where
     CE: std::error::Error,
     HCE: std::error::Error,
 {
-    type Output = Result<(SendRequest<ReqBody>, want::Taker), HTTP2ConnectionError<CE, HCE>>;
+    type Output = Result<HTTP2ConnectionInner<ReqBody, HCE>, HTTP2ConnectionError<CE, HCE>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.as_mut().project();
         // Wait for the first health check.
         Poll::Ready(match ready!(this.ready_notify.poll(cx)) {
             Err(_) => Err(HTTP2ConnectionError::ConnectionTaskLost),
-            Ok(Ok(sender)) => Ok((sender, this.alive_sentinel.take().unwrap())),
+            Ok(Ok((send_request, handle))) => Ok(HTTP2ConnectionInner {
+                send_request,
+                handle,
+                _sentinel: this.alive_sentinel.take().unwrap(),
+            }),
             Ok(Err(e)) => Err(e),
         })
     }
@@ -144,7 +145,6 @@ where
 fn monitor_connection<A, C, HC, ReqBody>(
     address: A,
     shared: Arc<HTTP2ConnectionShared<C, HC>>,
-    health: Arc<HTTP2ConnectionHealth<HC::Error>>,
     reporter: Reporter<SubchannelShared>,
 ) -> ConnectingFuture<ReqBody, C::Error, HC::Error>
 where
@@ -195,6 +195,8 @@ where
                 .fuse()
         );
         let mut conn = pin!(conn.fuse());
+        let handle = Arc::new(HTTP2ConnectionHandle::new(reporter));
+        let reporter = &handle.reporter;
         loop {
             select! {
                 r = conn => {
@@ -214,23 +216,22 @@ where
                         Some(Ok(())) => {
                             if !healthy.unwrap_or(false) {
                                 healthy = Some(true);
-                                health.set_healthy();
                                 reporter.shared().flags.set_healthy();
                                 reporter.request_attention();
                             }
                         }
                         Some(Err(e)) => {
                             reporter.shared().error.store(Some(Box::new(LoggedEvent::new(e.to_string()))), Ordering::AcqRel);
+                            *handle.error.lock().unwrap() = Some(e);
                             if healthy.unwrap_or(true) {
                                 reporter.shared().flags.set_unhealthy();
                                 reporter.request_attention();
                                 healthy = Some(false);
-                                health.set_unhealthy(e);
                             }
                         }
                     }
                     if let Some((sender, sender_tx)) = begin_usage.take() {
-                        let _ = sender_tx.send(Ok(sender));
+                        let _ = sender_tx.send(Ok((sender, Arc::clone(&handle))));
                     }
                 }
             }
@@ -243,9 +244,16 @@ where
 }
 
 #[derive(Debug)]
+struct HTTP2ConnectionInner<ReqBody, HCE> {
+    send_request: SendRequest<ReqBody>,
+    _sentinel: want::Taker,
+    handle: Arc<HTTP2ConnectionHandle<HCE>>,
+}
+
+#[derive(Debug)]
 enum HTTP2ConnectionState<ReqBody, CE: std::error::Error, HCE: std::error::Error> {
     Connecting(Pin<Box<ConnectingFuture<ReqBody, CE, HCE>>>),
-    Connected(SendRequest<ReqBody>, #[allow(dead_code)] want::Taker),
+    Connected(HTTP2ConnectionInner<ReqBody, HCE>),
 }
 
 #[derive(Debug)]
@@ -262,7 +270,6 @@ where
     HC::Error: std::error::Error,
 {
     pool: Arc<PoolCommon>,
-    health: Arc<HTTP2ConnectionHealth<HC::Error>>,
     state: HTTP2ConnectionState<ReqBody, C::Error, HC::Error>,
 }
 
@@ -284,18 +291,12 @@ where
         reporter: Reporter<SubchannelShared>,
         address: A,
     ) -> Self {
-        let health = Arc::new(HTTP2ConnectionHealth::new());
-        let monitor_health = Arc::clone(&health);
         // Box::pin is necessary so we can poll it from a Service.
         let fut = Box::pin(monitor_connection::<_, C, HC, ReqBody>(
-            address,
-            shared,
-            monitor_health,
-            reporter,
+            address, shared, reporter,
         ));
         Self {
             pool,
-            health,
             state: HTTP2ConnectionState::Connecting(fut),
         }
     }
@@ -317,17 +318,19 @@ where
     ) -> Poll<Result<(), HTTP2ConnectionError<C::Error, HC::Error>>> {
         match self.state {
             HTTP2ConnectionState::Connecting(ref mut fut) => {
-                let (sender, alive_sentinel) = ready!(fut.as_mut().poll(cx))?;
-                self.state = HTTP2ConnectionState::Connected(sender, alive_sentinel);
+                let handle = ready!(fut.as_mut().poll(cx))?;
+                self.state = HTTP2ConnectionState::Connected(handle);
                 self.poll_connect(cx)
             }
-            HTTP2ConnectionState::Connected(ref mut sender, _) => {
-                match self.health.get() {
-                    HealthState::Healthy => sender.poll_ready(cx).map_err(Into::into),
+            HTTP2ConnectionState::Connected(ref mut inner) => {
+                match inner.handle.get_healthy() {
+                    HealthState::NotYetChecked | HealthState::Healthy => {
+                        inner.send_request.poll_ready(cx).map_err(Into::into)
+                    }
                     HealthState::Unhealthy(e) => {
                         if self.pool.is_critically_unhealthy() {
                             // Emergency healthy
-                            sender.poll_ready(cx).map_err(Into::into)
+                            inner.send_request.poll_ready(cx).map_err(Into::into)
                         } else {
                             Poll::Ready(Err(HTTP2ConnectionError::Unhealthy(e)))
                         }
@@ -367,10 +370,10 @@ where
     }
 
     fn call(&mut self, req: http::Request<ReqBody>) -> Self::Future {
-        let HTTP2ConnectionState::Connected(ref mut sender, _) = self.state else {
+        let HTTP2ConnectionState::Connected(ref mut handle) = self.state else {
             panic!("HTTP2Connection not ready");
         };
-        Box::pin(sender.send_request(req).err_into())
+        Box::pin(handle.send_request.send_request(req).err_into())
     }
 }
 

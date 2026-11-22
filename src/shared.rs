@@ -1,5 +1,5 @@
 use atomicbox::AtomicOptionBox;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use crate::LoggedEvent;
 
@@ -59,10 +59,36 @@ impl crate::report::Clear for SubchannelFlags {
     }
 }
 
+#[repr(transparent)]
+#[derive(Debug, Default)]
+pub struct GaugeUsize(AtomicUsize);
+
+impl crate::report::Clear for GaugeUsize {
+    fn clear(&self) {
+        self.0.store(0, Ordering::Relaxed);
+    }
+}
+
+impl GaugeUsize {
+    pub fn inc(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec(&self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub fn get_unsync(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 clearable! {
     #[derive(Debug, Default)]
     pub struct SubchannelShared {
-        pub flags: SubchannelFlags,
-        pub error: AtomicOptionBox<LoggedEvent<String>>,
+        pub(crate) flags: SubchannelFlags,
+        pub(crate) error: AtomicOptionBox<LoggedEvent<String>>,
+        pub(crate) requests_in_flight: GaugeUsize,
     }
 }

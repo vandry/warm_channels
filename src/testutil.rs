@@ -3,13 +3,13 @@ use http::StatusCode;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::io::DuplexStream;
-use tower_service::Service;
+use tower_layer::Layer;
 
-use crate::channel::PoolService;
+use crate::channel::{PoolService, SubchannelMaker};
+use crate::subchannel::Subchannel;
 use crate::util::AssumeAlwaysHealthy;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -90,54 +90,50 @@ impl crate::Connector<TestServerAddress> for TestServer {
 type TestConnection =
     crate::connection::HTTP2Connection<TestServerAddress, TestServer, AssumeAlwaysHealthy, String>;
 
-pub(crate) struct TestSubchannel {
-    inner: TestConnection,
-}
+pub(crate) struct HandleCollector<T>(Arc<Mutex<Vec<Weak<T>>>>);
 
-impl TestSubchannel {
-    fn new(inner: TestConnection) -> Self {
-        Self { inner }
+pub(crate) struct HandlesSnapshot<'a, T>(std::sync::MutexGuard<'a, Vec<Weak<T>>>);
+
+impl<'a, T> HandlesSnapshot<'a, T> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Arc<T>> {
+        self.0.iter().filter_map(|x| x.upgrade())
     }
 }
 
-impl<R> Service<R> for TestSubchannel
-where
-    TestConnection: Service<R>,
-{
-    type Response = <TestConnection as Service<R>>::Response;
-    type Error = <TestConnection as Service<R>>::Error;
-    type Future = <TestConnection as Service<R>>::Future;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, req: R) -> Self::Future {
-        self.inner.call(req)
-    }
-}
-
-impl tower::load::Load for TestSubchannel {
-    type Metric = usize;
-
-    fn load(&self) -> usize {
-        1
+impl<T> HandleCollector<T> {
+    pub(crate) fn handles(&self) -> HandlesSnapshot<'_, T> {
+        HandlesSnapshot(self.0.lock().unwrap())
     }
 }
 
 pub(crate) fn test_channel(
     name: &'static str,
-) -> (PoolService<String, TestSubchannel>, impl Future) {
+) -> (
+    PoolService<String, <SubchannelMaker as Layer<TestConnection>>::Service>,
+    impl Future,
+    HandleCollector<<TestConnection as Subchannel>::Handle>,
+) {
     let rs = futures::stream::once(futures::future::ready(Ok::<_, std::convert::Infallible>(
         vec![TestServerAddress::Working],
     )));
-    crate::channel::pool_service_with_subchannel_layer(
+    let handles = Arc::new(Mutex::new(Vec::new()));
+    let handles_collector = Arc::clone(&handles);
+    let (channel, worker) = crate::channel::pool_service_with_subchannel_layer(
         crate::pool::PoolConfig::default(),
         name,
         TestServer::new(),
         rs,
         AssumeAlwaysHealthy::default(),
         |_| (),
-        tower::ServiceBuilder::new().layer_fn(|s| TestSubchannel::new(s)),
-    )
+        tower::ServiceBuilder::new()
+            .layer(SubchannelMaker::new())
+            .layer_fn(move |s: TestConnection| {
+                handles_collector
+                    .lock()
+                    .unwrap()
+                    .push(Arc::downgrade(Subchannel::handle(&s)));
+                s
+            }),
+    );
+    (channel, worker, HandleCollector(handles))
 }

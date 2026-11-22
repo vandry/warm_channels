@@ -234,6 +234,18 @@ trait PoolMemberMaker<A> {
     ) -> Self::Connection;
 }
 
+mod subchannel {
+    pub trait SubchannelHandle {
+        fn shared(&self) -> &crate::shared::SubchannelShared;
+    }
+
+    pub trait Subchannel {
+        type Handle: SubchannelHandle;
+
+        fn handle(&self) -> &std::sync::Arc<Self::Handle>;
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(crate) struct LoggedEvent<E> {
     original_timestamp: SystemTime,

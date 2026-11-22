@@ -209,7 +209,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn channel_list() {
         let exclusive = ONE_TEST_AT_A_TIME.lock().await;
-        let (_c, worker) = test_channel("test-channel-channel_list");
+        let (_c, worker, _) = test_channel("test-channel-channel_list");
         let mut worker = pin!(worker.fuse());
         let mut req = pin!(
             ChannelDiagService::default()
@@ -232,7 +232,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn channel_does_not_respond() {
         let exclusive = ONE_TEST_AT_A_TIME.lock().await;
-        let (_c, _worker) = test_channel("test-channel-channel_does_not_respond");
+        let (_c, _worker, _) = test_channel("test-channel-channel_does_not_respond");
         let mut req = pin!(
             ChannelDiagService::default()
                 .oneshot(
@@ -256,7 +256,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn channel_details() {
         let exclusive = ONE_TEST_AT_A_TIME.lock().await;
-        let (_c, worker) = test_channel("test-channel-channel_details");
+        let (_c, worker, _) = test_channel("test-channel-channel_details");
         let mut worker = pin!(worker.fuse());
         let mut test = pin!(
             async {

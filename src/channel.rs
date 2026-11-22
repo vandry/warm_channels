@@ -1,14 +1,16 @@
 use futures::select;
 use futures::{FutureExt, Stream};
-use requests_gauge::CompleteAfterBody;
+use requests_gauge::{CompleteAfterBody, RequestsGaugeLayer, WithCompletionSubscriber};
 use std::future::Future;
 use std::pin::pin;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use tower::load::pending_requests::PendingRequests;
 use tower_layer::Layer;
 use tower_service::Service;
 
 use crate::pool::{PoolConfig, balancer_pool};
+use crate::subchannel::{Subchannel, SubchannelHandle};
 use crate::{Connector, HealthChecker};
 
 type ChannelInner<S, ReqBody> =
@@ -48,8 +50,78 @@ where
     .await;
 }
 
+pub struct CountInFlight<H: SubchannelHandle>(Weak<H>);
+
+impl<R, H: SubchannelHandle> requests_gauge::RequestsGaugeSubscriber<R> for CountInFlight<H> {
+    fn request_started(&mut self) {
+        if let Some(h) = self.0.upgrade() {
+            h.shared().requests_in_flight.inc();
+        }
+    }
+}
+
+impl<H: SubchannelHandle> Drop for CountInFlight<H> {
+    fn drop(&mut self) {
+        if let Some(h) = self.0.upgrade() {
+            h.shared().requests_in_flight.dec();
+        }
+    }
+}
+
+pub struct SubchannelBase<T, H> {
+    inner: T,
+    handle: Weak<H>,
+}
+
+impl<T, R, H> Service<R> for SubchannelBase<T, H>
+where
+    T: Service<WithCompletionSubscriber<R, CountInFlight<H>>>,
+    H: SubchannelHandle,
+{
+    type Response = T::Response;
+    type Error = T::Error;
+    type Future = T::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: R) -> Self::Future {
+        self.inner.call(WithCompletionSubscriber::new(
+            req,
+            CountInFlight(self.handle.clone()),
+        ))
+    }
+}
+
+pub struct SubchannelMaker(RequestsGaugeLayer);
+
+impl SubchannelMaker {
+    pub(crate) fn new() -> Self {
+        Self(RequestsGaugeLayer::new())
+    }
+}
+
+impl<S: Subchannel> Layer<S> for SubchannelMaker {
+    type Service = PendingRequests<
+        SubchannelBase<<RequestsGaugeLayer as Layer<S>>::Service, <S as Subchannel>::Handle>,
+        CompleteAfterBody,
+    >;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        let handle = Arc::downgrade(inner.handle());
+        PendingRequests::new(
+            SubchannelBase {
+                inner: self.0.layer(inner),
+                handle,
+            },
+            CompleteAfterBody,
+        )
+    }
+}
+
 pub(crate) type PoolMemberService<A, ReqBody, C, HC> =
-    PendingRequests<crate::connection::HTTP2Connection<A, C, HC, ReqBody>, CompleteAfterBody>;
+    <SubchannelMaker as Layer<crate::connection::HTTP2Connection<A, C, HC, ReqBody>>>::Service;
 
 pub(crate) type PoolService<ReqBody, S> = crate::balance_driver::ShimmedService<
     tower::balance::p2c::Balance<
@@ -123,6 +195,7 @@ where
 /// - A [`tower::balance::p2c::Balance`] service which accepts requests.
 /// - A worker which must be spawned as a task on an executor (e.g.
 ///   using [`tokio::task::spawn`]) in order for the channel to work.
+#[allow(clippy::type_complexity)]
 pub fn pool_service<A, RS, RE, C, HC, HR, ReqBody, L>(
     config: PoolConfig,
     label: L,
@@ -156,7 +229,7 @@ where
         resolution_stream,
         health_checker,
         healthy_callback,
-        tower::ServiceBuilder::new().layer_fn(|s| PendingRequests::new(s, CompleteAfterBody)),
+        SubchannelMaker::new(),
     )
 }
 
@@ -199,5 +272,49 @@ where
 
     fn call(&mut self, request: http::Request<ReqBody>) -> Self::Future {
         Service::call(&mut self.0, request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::FutureExt;
+    use futures::future::Either;
+    use futures::pin_mut;
+    use std::pin::pin;
+    use tower::ServiceExt;
+    use tower_service::Service;
+
+    use crate::subchannel::SubchannelHandle;
+    use crate::testutil::test_channel;
+
+    #[tokio::test(start_paused = true)]
+    async fn count_requests() {
+        let (mut ch, worker, handles) = test_channel("test-channel-count_requests");
+        pin_mut!(worker);
+
+        let req = http::Request::builder()
+            .uri("http://nowhere/success")
+            .body(String::new())
+            .expect("trivial test request");
+        let req_exec = pin!(ch.ready().then(|s| s.expect("ready").call(req)));
+        let response = match futures::future::select(worker, req_exec).await {
+            Either::Left((_, fut)) => fut.await,
+            Either::Right((response, _)) => response,
+        }
+        .expect("success");
+
+        let count: usize = handles
+            .handles()
+            .iter()
+            .map(|h| h.shared().requests_in_flight.get_unsync())
+            .sum();
+        assert_eq!(count, 1);
+        drop(response);
+        let count: usize = handles
+            .handles()
+            .iter()
+            .map(|h| h.shared().requests_in_flight.get_unsync())
+            .sum();
+        assert_eq!(count, 0);
     }
 }

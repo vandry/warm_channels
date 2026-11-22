@@ -16,6 +16,7 @@ use tower_service::Service;
 use crate::pool::PoolCommon;
 use crate::report::Reporter;
 use crate::shared::SubchannelShared;
+use crate::subchannel::{Subchannel, SubchannelHandle};
 use crate::{Connector, LoggedEvent};
 
 struct SendRequestService<B>(SendRequest<B>);
@@ -46,7 +47,7 @@ enum HealthState<E> {
 }
 
 #[derive(Debug)]
-struct HTTP2ConnectionHandle<E> {
+pub struct HTTP2ConnectionHandle<E> {
     reporter: Reporter<SubchannelShared>,
     error: std::sync::Mutex<Option<E>>,
 }
@@ -66,7 +67,9 @@ impl<E: Clone> HTTP2ConnectionHandle<E> {
             None => HealthState::NotYetChecked,
         }
     }
+}
 
+impl<E> SubchannelHandle for HTTP2ConnectionHandle<E> {
     fn shared(&self) -> &SubchannelShared {
         self.reporter.shared()
     }
@@ -116,7 +119,7 @@ pin_project! {
     #[derive(Debug)]
     struct ConnectingFuture<ReqBody, CE: std::error::Error, HCE: std::error::Error> {
         alive_sentinel: Option<want::Taker>,
-        #[pin] ready_notify: tokio::sync::oneshot::Receiver<Result<(SendRequest<ReqBody>, Arc<HTTP2ConnectionHandle<HCE>>), HTTP2ConnectionError<CE, HCE>>>,
+        #[pin] ready_notify: tokio::sync::oneshot::Receiver<Result<SendRequest<ReqBody>, HTTP2ConnectionError<CE, HCE>>>,
     }
 }
 
@@ -125,16 +128,15 @@ where
     CE: std::error::Error,
     HCE: std::error::Error,
 {
-    type Output = Result<HTTP2ConnectionInner<ReqBody, HCE>, HTTP2ConnectionError<CE, HCE>>;
+    type Output = Result<HTTP2ConnectionInner<ReqBody>, HTTP2ConnectionError<CE, HCE>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.as_mut().project();
         // Wait for the first health check.
         Poll::Ready(match ready!(this.ready_notify.poll(cx)) {
             Err(_) => Err(HTTP2ConnectionError::ConnectionTaskLost),
-            Ok(Ok((send_request, handle))) => Ok(HTTP2ConnectionInner {
+            Ok(Ok(send_request)) => Ok(HTTP2ConnectionInner {
                 send_request,
-                handle,
                 _sentinel: this.alive_sentinel.take().unwrap(),
             }),
             Ok(Err(e)) => Err(e),
@@ -145,7 +147,7 @@ where
 fn monitor_connection<A, C, HC, ReqBody>(
     address: A,
     shared: Arc<HTTP2ConnectionShared<C, HC>>,
-    reporter: Reporter<SubchannelShared>,
+    handle: Arc<HTTP2ConnectionHandle<HC::Error>>,
 ) -> ConnectingFuture<ReqBody, C::Error, HC::Error>
 where
     A: Send + 'static,
@@ -161,6 +163,7 @@ where
     let (mut giver, taker) = want::new();
     let (sender_tx, sender_rx) = tokio::sync::oneshot::channel();
     tokio::task::spawn(async move {
+        let reporter = &handle.reporter;
         let stop_signal = pin!(giver.want().fuse());
         let init = pin!(initial_connect::<_, _, ReqBody, HC::Error>(
             &shared.connector,
@@ -195,8 +198,6 @@ where
                 .fuse()
         );
         let mut conn = pin!(conn.fuse());
-        let handle = Arc::new(HTTP2ConnectionHandle::new(reporter));
-        let reporter = &handle.reporter;
         loop {
             select! {
                 r = conn => {
@@ -231,7 +232,7 @@ where
                         }
                     }
                     if let Some((sender, sender_tx)) = begin_usage.take() {
-                        let _ = sender_tx.send(Ok((sender, Arc::clone(&handle))));
+                        let _ = sender_tx.send(Ok(sender));
                     }
                 }
             }
@@ -244,16 +245,15 @@ where
 }
 
 #[derive(Debug)]
-struct HTTP2ConnectionInner<ReqBody, HCE> {
+struct HTTP2ConnectionInner<ReqBody> {
     send_request: SendRequest<ReqBody>,
     _sentinel: want::Taker,
-    handle: Arc<HTTP2ConnectionHandle<HCE>>,
 }
 
 #[derive(Debug)]
 enum HTTP2ConnectionState<ReqBody, CE: std::error::Error, HCE: std::error::Error> {
     Connecting(Pin<Box<ConnectingFuture<ReqBody, CE, HCE>>>),
-    Connected(HTTP2ConnectionInner<ReqBody, HCE>),
+    Connected(HTTP2ConnectionInner<ReqBody>),
 }
 
 #[derive(Debug)]
@@ -270,6 +270,7 @@ where
     HC::Error: std::error::Error,
 {
     pool: Arc<PoolCommon>,
+    handle: Arc<HTTP2ConnectionHandle<HC::Error>>,
     state: HTTP2ConnectionState<ReqBody, C::Error, HC::Error>,
 }
 
@@ -291,12 +292,16 @@ where
         reporter: Reporter<SubchannelShared>,
         address: A,
     ) -> Self {
+        let handle = Arc::new(HTTP2ConnectionHandle::new(reporter));
         // Box::pin is necessary so we can poll it from a Service.
         let fut = Box::pin(monitor_connection::<_, C, HC, ReqBody>(
-            address, shared, reporter,
+            address,
+            shared,
+            Arc::clone(&handle),
         ));
         Self {
             pool,
+            handle,
             state: HTTP2ConnectionState::Connecting(fut),
         }
     }
@@ -323,7 +328,7 @@ where
                 self.poll_connect(cx)
             }
             HTTP2ConnectionState::Connected(ref mut inner) => {
-                match inner.handle.get_healthy() {
+                match self.handle.get_healthy() {
                     HealthState::NotYetChecked | HealthState::Healthy => {
                         inner.send_request.poll_ready(cx).map_err(Into::into)
                     }
@@ -338,6 +343,19 @@ where
                 }
             }
         }
+    }
+}
+
+impl<A, C, HC, ReqBody> Subchannel for HTTP2Connection<A, C, HC, ReqBody>
+where
+    C: Connector<A>,
+    HC: crate::HealthChecker<ReqBody>,
+    HC::Error: std::error::Error,
+{
+    type Handle = HTTP2ConnectionHandle<HC::Error>;
+
+    fn handle(&self) -> &Arc<Self::Handle> {
+        &self.handle
     }
 }
 

@@ -5,6 +5,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll};
 use tower::load::pending_requests::PendingRequests;
+use tower_layer::Layer;
 use tower_service::Service;
 
 use crate::pool::{PoolConfig, balancer_pool};
@@ -47,19 +48,57 @@ where
     .await;
 }
 
-pub(crate) type PoolService<A, ReqBody, C, HC> = crate::balance_driver::ShimmedService<
+pub(crate) type PoolMemberService<A, ReqBody, C, HC> =
+    PendingRequests<crate::connection::HTTP2Connection<A, C, HC, ReqBody>, CompleteAfterBody>;
+
+pub(crate) type PoolService<ReqBody, S> = crate::balance_driver::ShimmedService<
     tower::balance::p2c::Balance<
-        crate::balance_driver::ShimmedStream<
-            crate::pool::DiscoverItem<
-                PendingRequests<
-                    crate::connection::HTTP2Connection<A, C, HC, ReqBody>,
-                    CompleteAfterBody,
-                >,
-            >,
-        >,
+        crate::balance_driver::ShimmedStream<crate::pool::DiscoverItem<S>>,
         http::Request<ReqBody>,
     >,
 >;
+
+pub(crate) fn pool_service_with_subchannel_layer<A, RS, RE, C, HC, HR, ReqBody, L, LL>(
+    config: PoolConfig,
+    label: L,
+    connector: C,
+    resolution_stream: RS,
+    health_checker: HC,
+    healthy_callback: HR,
+    subchannel_layer: LL,
+) -> (PoolService<ReqBody, LL::Service>, impl Future<Output = ()>)
+where
+    A: std::hash::Hash + std::fmt::Debug + Eq + Send + Sync + Clone + 'static,
+    RS: Stream<Item = Result<Vec<A>, RE>>,
+    RE: std::error::Error,
+    C: Connector<A> + Send + Sync + 'static,
+    C::IO: Send,
+    C::Error: Send + Sync + 'static,
+    HC: HealthChecker<ReqBody> + Send + Sync + 'static,
+    HC::Error: std::error::Error + Clone + Send + Sync,
+    HR: Fn(bool) + Send + 'static,
+    ReqBody: hyper::body::Body + Send + Unpin + 'static,
+    ReqBody::Data: Send,
+    ReqBody::Error: std::error::Error + Send + Sync,
+    L: AsRef<str>,
+    LL: Layer<crate::connection::HTTP2Connection<A, C, HC, ReqBody>>,
+    LL::Service: Service<http::Request<ReqBody>> + Unpin + tower::load::Load,
+    <LL::Service as tower::load::Load>::Metric: std::fmt::Debug,
+    <LL::Service as Service<http::Request<ReqBody>>>::Error:
+        std::error::Error + Send + Sync + 'static,
+{
+    let discover = balancer_pool(
+        config,
+        label,
+        crate::connection::HTTP2ConnectionMaker::new(connector, health_checker, subchannel_layer),
+        crate::default_backoff(),
+        healthy_callback,
+        resolution_stream,
+    );
+    let mut shim = crate::balance_driver::Shim::new();
+    let stack = tower::balance::p2c::Balance::new(shim.stream());
+    shim.service_and_worker(stack, discover)
+}
 
 /// Build a new always-ready load-balanced HTTP client channel.
 ///
@@ -91,7 +130,10 @@ pub fn pool_service<A, RS, RE, C, HC, HR, ReqBody, L>(
     resolution_stream: RS,
     health_checker: HC,
     healthy_callback: HR,
-) -> (PoolService<A, ReqBody, C, HC>, impl Future<Output = ()>)
+) -> (
+    PoolService<ReqBody, PoolMemberService<A, ReqBody, C, HC>>,
+    impl Future<Output = ()>,
+)
 where
     A: std::hash::Hash + std::fmt::Debug + Eq + Send + Sync + Clone + 'static,
     RS: Stream<Item = Result<Vec<A>, RE>>,
@@ -107,22 +149,15 @@ where
     ReqBody::Error: std::error::Error + Send + Sync,
     L: AsRef<str>,
 {
-    let discover = balancer_pool(
+    pool_service_with_subchannel_layer(
         config,
         label,
-        crate::connection::HTTP2ConnectionMaker::new(
-            connector,
-            health_checker,
-            tower::ServiceBuilder::new()
-                .layer_fn(|s| PendingRequests::new(s, CompleteAfterBody)),
-        ),
-        crate::default_backoff(),
-        healthy_callback,
+        connector,
         resolution_stream,
-    );
-    let mut shim = crate::balance_driver::Shim::new();
-    let stack = tower::balance::p2c::Balance::new(shim.stream());
-    shim.service_and_worker(stack, discover)
+        health_checker,
+        healthy_callback,
+        tower::ServiceBuilder::new().layer_fn(|s| PendingRequests::new(s, CompleteAfterBody)),
+    )
 }
 
 impl<S, ReqBody> Channel<S, ReqBody>

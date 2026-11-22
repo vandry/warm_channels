@@ -188,7 +188,10 @@ impl crate::HealthChecker<tonic::body::Body> for GRPCHealthChecker {
 #[cfg(feature = "metrics")]
 pub type GRPCChannel<A, C, HC = GRPCHealthChecker> = crate::channel::Channel<
     <crate::grpc_metrics::MetricsLayer as Layer<
-        crate::channel::PoolService<A, tonic::body::Body, C, HC>,
+        crate::channel::PoolService<
+            tonic::body::Body,
+            crate::channel::PoolMemberService<A, tonic::body::Body, C, HC>,
+        >,
     >>::Service,
     tonic::body::Body,
 >;

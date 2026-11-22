@@ -202,28 +202,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::channel::PoolService;
-    use crate::testutil::{TestServer, TestServerAddress};
-    use crate::util::AssumeAlwaysHealthy;
-
-    fn test_channel(
-        name: &'static str,
-    ) -> (
-        PoolService<TestServerAddress, String, TestServer, AssumeAlwaysHealthy>,
-        impl Future,
-    ) {
-        let rs = futures::stream::once(futures::future::ready(Ok::<_, std::convert::Infallible>(
-            vec![TestServerAddress::Working],
-        )));
-        crate::channel::pool_service(
-            crate::pool::PoolConfig::default(),
-            name,
-            TestServer::new(),
-            rs,
-            AssumeAlwaysHealthy::default(),
-            |_| (),
-        )
-    }
+    use crate::testutil::test_channel;
 
     static ONE_TEST_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 

@@ -5,7 +5,12 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use tokio::io::DuplexStream;
+use tower_service::Service;
+
+use crate::channel::PoolService;
+use crate::util::AssumeAlwaysHealthy;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum TestServerAddress {
@@ -80,4 +85,59 @@ impl crate::Connector<TestServerAddress> for TestServer {
             }
         }
     }
+}
+
+type TestConnection =
+    crate::connection::HTTP2Connection<TestServerAddress, TestServer, AssumeAlwaysHealthy, String>;
+
+pub(crate) struct TestSubchannel {
+    inner: TestConnection,
+}
+
+impl TestSubchannel {
+    fn new(inner: TestConnection) -> Self {
+        Self { inner }
+    }
+}
+
+impl<R> Service<R> for TestSubchannel
+where
+    TestConnection: Service<R>,
+{
+    type Response = <TestConnection as Service<R>>::Response;
+    type Error = <TestConnection as Service<R>>::Error;
+    type Future = <TestConnection as Service<R>>::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: R) -> Self::Future {
+        self.inner.call(req)
+    }
+}
+
+impl tower::load::Load for TestSubchannel {
+    type Metric = usize;
+
+    fn load(&self) -> usize {
+        1
+    }
+}
+
+pub(crate) fn test_channel(
+    name: &'static str,
+) -> (PoolService<String, TestSubchannel>, impl Future) {
+    let rs = futures::stream::once(futures::future::ready(Ok::<_, std::convert::Infallible>(
+        vec![TestServerAddress::Working],
+    )));
+    crate::channel::pool_service_with_subchannel_layer(
+        crate::pool::PoolConfig::default(),
+        name,
+        TestServer::new(),
+        rs,
+        AssumeAlwaysHealthy::default(),
+        |_| (),
+        tower::ServiceBuilder::new().layer_fn(|s| TestSubchannel::new(s)),
+    )
 }

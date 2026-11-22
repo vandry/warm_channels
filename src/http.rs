@@ -13,7 +13,10 @@ use crate::util::AssumeAlwaysHealthy;
 /// The type of the channel returned by [`http_channel`]. This implements
 /// [`tower_service::Service`] with `ReqBody` as the HTTP request body.
 pub type HTTPChannel<A, C, ReqBody> = crate::channel::Channel<
-    crate::channel::PoolService<A, ReqBody, C, AssumeAlwaysHealthy>,
+    crate::channel::PoolService<
+        ReqBody,
+        crate::channel::PoolMemberService<A, ReqBody, C, AssumeAlwaysHealthy>,
+    >,
     ReqBody,
 >;
 

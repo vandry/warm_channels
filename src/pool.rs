@@ -506,26 +506,25 @@ where
                 resolved_addresses: regulator.addresses.diag_list().collect(),
                 subchannels: subchannels
                     .iter()
-                    .map(|(s, shared)| {
-                        let flags = shared.flags.get();
-                        format!(
-                            "{} to {:?}, {}",
-                            if flags.connected() {
-                                "Connected"
+                    .map(|(s, m)| {
+                        let requests_in_flight = m.requests_in_flight.get_unsync();
+                        let flags = m.flags.get();
+                        crate::diag::SubchannelReport {
+                            state: if flags.connected() {
+                                match flags.healthy() {
+                                    Some(true) => crate::diag::SubchannelState::Healthy,
+                                    Some(false) => crate::diag::SubchannelState::Unhealthy,
+                                    None => crate::diag::SubchannelState::NeverHealthy,
+                                }
                             } else {
-                                "Connecting"
+                                crate::diag::SubchannelState::Connecting
                             },
-                            regulator.addresses.diag_get_address(s.address_index),
-                            if s.healthy {
-                                "healthy"
-                            } else if s.ever_healthy {
-                                "unhealthy"
-                            } else if flags.connected() {
-                                "never healthy"
-                            } else {
-                                "connection in progress"
-                            }
-                        )
+                            address: format!(
+                                "{:?}",
+                                regulator.addresses.diag_get_address(s.address_index)
+                            ),
+                            requests_in_flight,
+                        }
                     })
                     .collect(),
                 n_subchannels_want: regulator.config.n_subchannels_want,

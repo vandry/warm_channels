@@ -78,7 +78,7 @@ impl GaugeUsize {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "diag"))]
     pub fn get_unsync(&self) -> usize {
         self.0.load(Ordering::Relaxed)
     }

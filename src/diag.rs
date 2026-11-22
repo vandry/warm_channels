@@ -2,6 +2,7 @@ use futures::{Stream, StreamExt};
 use http::StatusCode;
 use itertools::Itertools;
 use std::borrow::Cow;
+use std::fmt::Display;
 use std::future::Future;
 use std::pin::{Pin, pin};
 use std::task::{Context, Poll};
@@ -13,9 +14,42 @@ use crate::snapshot::{Collection, Entry};
 const REPORT_TIMEOUT: Duration = Duration::from_millis(4000);
 
 #[derive(Debug)]
+pub enum SubchannelState {
+    Connecting,
+    NeverHealthy,
+    Healthy,
+    Unhealthy,
+}
+
+#[derive(Debug)]
+pub struct SubchannelReport {
+    pub state: SubchannelState,
+    pub address: String,
+    pub requests_in_flight: usize,
+}
+
+impl SubchannelReport {
+    fn table_row(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            r#"
+                <tr>
+                    <td>{:?}</td>
+                    <td>{}</td>
+                    <td>{}</td>
+                </tr>
+            "#,
+            self.state,
+            html_escape::encode_text(&self.address),
+            self.requests_in_flight,
+        )
+    }
+}
+
+#[derive(Debug)]
 pub struct FullReport {
     pub resolved_addresses: Vec<String>,
-    pub subchannels: Vec<String>,
+    pub subchannels: Vec<SubchannelReport>,
     pub n_subchannels_want: usize,
 }
 
@@ -26,18 +60,13 @@ pub struct Report {
     pub more: Option<FullReport>,
 }
 
-impl Report {
-    fn header(&self) -> String {
-        format!(
-            r#"<li><a href="{}">{}</a></li>"#,
-            self.id,
-            html_escape::encode_text(&self.label)
-        )
-    }
+struct FullReportWriter<'a>(&'a Report);
 
-    fn full(&self) -> String {
-        let more = self.more.as_ref().unwrap();
-        format!(
+impl Display for FullReportWriter<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let more = self.0.more.as_ref().unwrap();
+        write!(
+            f,
             r#"
             <html><head>
                 <title>Debug: Client Channel: {}</title>
@@ -48,27 +77,46 @@ impl Report {
             {}
             </ul>
             <h3>Subchannels</h3>
-            <ul>
-            {}{}
-            </ul>
+            <table border="1">
+                <tr>
+                    <th>State</th><th>Address</th>
+                    <th>Requests in flight</th>
+                </tr>
+            "#,
+            html_escape::encode_text(&self.0.label),
+            html_escape::encode_text(&self.0.label),
+            more.resolved_addresses.iter().join(""),
+        )?;
+        for s in &more.subchannels {
+            s.table_row(f)?;
+        }
+        if more.n_subchannels_want > more.subchannels.len() {
+            write!(
+                f,
+                r#"<tr><td colspan="3">
+                    +{} additional subchannels needed to make up {} in total
+                </td></tr>
+                "#,
+                more.n_subchannels_want - more.subchannels.len(),
+                more.n_subchannels_want
+            )?;
+        }
+        write!(
+            f,
+            r#"
+            </table>
             </body></html>
             "#,
-            html_escape::encode_text(&self.label),
-            html_escape::encode_text(&self.label),
-            more.resolved_addresses.iter().join(""),
-            more.subchannels
-                .iter()
-                .map(|a| format!("<li>{}</li>\n", html_escape::encode_text(a)))
-                .join(""),
-            if more.n_subchannels_want > more.subchannels.len() {
-                format!(
-                    "<li>+{} additional subchannels needed to make up {} in total</li>",
-                    more.n_subchannels_want - more.subchannels.len(),
-                    more.n_subchannels_want
-                )
-            } else {
-                "".into()
-            },
+        )
+    }
+}
+
+impl Report {
+    fn header(&self) -> String {
+        format!(
+            r#"<li><a href="{}">{}</a></li>"#,
+            self.id,
+            html_escape::encode_text(&self.label)
         )
     }
 }
@@ -178,7 +226,7 @@ impl<'a, B> Service<http::Request<B>> for ChannelDiagService<'a> {
                 ChannelDiagServiceAction::Specific(unique) => collection
                     .request_by_unique(unique, true)
                     .await
-                    .map(|r| r.full()),
+                    .map(|r| format!("{}", FullReportWriter(&r))),
                 ChannelDiagServiceAction::NotFound => None,
             };
             Ok(match resp {
